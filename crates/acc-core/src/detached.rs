@@ -669,15 +669,28 @@ mod tests {
         let home = std::env::temp_dir().join(format!("acc-input-{}", std::process::id()));
         let d = home.join(ROOT).join("s1");
         std::fs::create_dir_all(&d).unwrap();
+        // A hang fails the test after 5s (no GNU `timeout` on macOS).
         let run = |script: String| {
-            std::process::Command::new("timeout")
-                .args(["5", "sh", "-c", &script])
+            let mut child = std::process::Command::new("sh")
+                .args(["-c", &script])
                 .env("HOME", &home)
                 .stdin(std::process::Stdio::null())
-                .output()
-                .unwrap()
-                .status
-                .code()
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .unwrap();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+            loop {
+                if let Some(status) = child.try_wait().unwrap() {
+                    return status.code();
+                }
+                if std::time::Instant::now() > deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    panic!("script hung: {script}");
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
         };
         let dir = SessionDir::new("s1").unwrap();
         assert_eq!(run(format!("mkfifo {}", d.join("in").display())), Some(0));

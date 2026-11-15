@@ -730,7 +730,8 @@ mod tests {
     }
 }
 
-#[cfg(test)]
+// The scripts target POSIX hosts; Git Bash on Windows copies on `ln -s`.
+#[cfg(all(test, unix))]
 #[allow(clippy::unwrap_used, clippy::expect_used)]
 mod sh_tests {
     use super::*;
