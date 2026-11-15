@@ -1187,6 +1187,10 @@ pub struct AccLaunchRequest {
     /// Permission / yolo mode: Claude mode, Codex profile or approval policy,
     /// Cursor `yolo`/`auto-review`, opencode `auto`, Copilot `allow_all`.
     pub permission: Option<String>,
+    /// Agent persona to start with (Copilot `--agent`); other harnesses
+    /// ignore it.
+    #[uniffi(default = None)]
+    pub agent: Option<String>,
     pub resume: Option<String>,
     pub fork: bool,
     pub title: Option<String>,
@@ -1227,6 +1231,7 @@ impl From<AccLaunchRequest> for LaunchRequest {
             cwd: r.cwd,
             model: r.model,
             permission: r.permission,
+            agent: r.agent,
             resume: r.resume,
             fork: r.fork,
             title: r.title,
@@ -1251,6 +1256,7 @@ impl From<LaunchRequest> for AccLaunchRequest {
             cwd: r.cwd,
             model: r.model,
             permission: r.permission,
+            agent: r.agent,
             resume: r.resume,
             fork: r.fork,
             title: r.title,
@@ -1276,6 +1282,8 @@ pub struct AccSessionSpec {
     pub cwd: String,
     pub model: Option<String>,
     pub permission: Option<String>,
+    /// See `AccLaunchRequest::agent`.
+    pub agent: Option<String>,
     pub native_id: Option<String>,
     pub title: Option<String>,
     pub created_ms: u64,
@@ -1302,6 +1310,7 @@ impl From<&SessionSpec> for AccSessionSpec {
             cwd: s.cwd.clone(),
             model: s.model.clone(),
             permission: s.permission.clone(),
+            agent: s.agent.clone(),
             native_id: s.native_id.clone(),
             title: s.title.clone(),
             created_ms: s.created_ms,

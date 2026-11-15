@@ -196,7 +196,7 @@ impl Harness {
                 (a, vec![("PI_PROGRAM_STATUS".into(), "1".into())])
             }
             h @ (Harness::Cursor | Harness::Copilot | Harness::Opencode) => {
-                return acp_launch_spec(h, None, None);
+                return acp_launch_spec(h, None, None, None);
             }
         };
         LaunchSpec {
@@ -326,7 +326,12 @@ pub fn parse_probe(out: &str) -> Vec<Availability> {
 /// How to start a harness's ACP server (Cursor, Copilot, opencode). Lives
 /// here rather than in [`crate::acp`] so launching needs no driver. Cursor takes global flags before
 /// the subcommand (`agent --model X [--yolo|--auto-review] acp`).
-pub fn acp_launch_spec(harness: Harness, model: Option<&str>, permission: Option<&str>) -> LaunchSpec {
+pub fn acp_launch_spec(
+    harness: Harness,
+    model: Option<&str>,
+    permission: Option<&str>,
+    agent: Option<&str>,
+) -> LaunchSpec {
     let mut args: Vec<String> = Vec::new();
     let model_flag = |args: &mut Vec<String>| {
         if let Some(m) = model {
@@ -344,6 +349,11 @@ pub fn acp_launch_spec(harness: Harness, model: Option<&str>, permission: Option
         Harness::Copilot => {
             args.push("--acp".into());
             model_flag(&mut args);
+            // Copilot CLI 1.0.107+ applies the agent persona (prompt and
+            // tools) at startup in ACP mode.
+            if let Some(a) = agent.map(str::trim).filter(|a| !a.is_empty()) {
+                args.extend(["--agent".to_owned(), a.to_owned()]);
+            }
         }
         // opencode: model is a config option; `--auto` is a global flag.
         Harness::Opencode => {
@@ -494,7 +504,7 @@ mod tests {
     fn acp_harnesses_launch_over_acp() {
         for h in Harness::ALL.into_iter().filter(|h| h.native_acp()) {
             let spec = h.launch(None);
-            assert_eq!(spec, acp_launch_spec(h, None, None));
+            assert_eq!(spec, acp_launch_spec(h, None, None, None));
             assert_eq!(spec.protocol, h.preferred_protocol());
         }
         assert_eq!(Harness::Opencode.launch(None).args, ["acp"]);
@@ -532,16 +542,16 @@ mod tests {
 
     #[test]
     fn permission_reaches_the_acp_launch_flags() {
-        let cursor = acp_launch_spec(Harness::Cursor, Some("m"), Some("yolo"));
+        let cursor = acp_launch_spec(Harness::Cursor, Some("m"), Some("yolo"), None);
         assert_eq!(cursor.args, ["--model", "m", "--yolo", "acp"]);
-        let cursor = acp_launch_spec(Harness::Cursor, None, Some("default"));
+        let cursor = acp_launch_spec(Harness::Cursor, None, Some("default"), None);
         assert_eq!(cursor.args, ["acp"]);
-        let opencode = acp_launch_spec(Harness::Opencode, None, Some("auto"));
+        let opencode = acp_launch_spec(Harness::Opencode, None, Some("auto"), None);
         assert_eq!(opencode.args, ["--auto", "acp"]);
-        let opencode = acp_launch_spec(Harness::Opencode, None, Some("default"));
+        let opencode = acp_launch_spec(Harness::Opencode, None, Some("default"), None);
         assert_eq!(opencode.args, ["acp"]);
         // Copilot takes no spawn flag for permission.
-        let copilot = acp_launch_spec(Harness::Copilot, None, Some("yolo"));
+        let copilot = acp_launch_spec(Harness::Copilot, None, Some("yolo"), None);
         assert_eq!(copilot.args, ["--acp"]);
     }
 

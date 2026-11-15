@@ -97,6 +97,10 @@ pub struct AcpConfig {
     /// advertise `sessionCapabilities.systemPrompt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// Agent persona passed at spawn (Copilot `--agent`): its prompt and
+    /// tools apply from startup.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 impl AcpConfig {
@@ -108,6 +112,7 @@ impl AcpConfig {
             model: None,
             permission: None,
             system_prompt: None,
+            agent: None,
         }
     }
 }
@@ -1798,6 +1803,7 @@ impl Driver for AcpDriver {
             self.harness,
             self.opts.spawn_model.as_deref(),
             self.opts.spawn_permission.as_deref(),
+            self.cfg.agent.as_deref(),
         )
     }
 
