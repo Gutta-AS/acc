@@ -1214,6 +1214,10 @@ pub struct AccLaunchRequest {
     /// instead of asking, for unattended sessions.
     #[uniffi(default = false)]
     pub deny_instead_of_prompting: bool,
+    /// Instructions appended to the harness's own system prompt (Claude,
+    /// pi, Codex, and ACP agents that advertise it).
+    #[uniffi(default = None)]
+    pub system_prompt: Option<String>,
 }
 
 impl From<AccLaunchRequest> for LaunchRequest {
@@ -1235,6 +1239,7 @@ impl From<AccLaunchRequest> for LaunchRequest {
             worktree: r.worktree,
             sandbox: r.sandbox.map(Into::into),
             deny_instead_of_prompting: r.deny_instead_of_prompting,
+            system_prompt: r.system_prompt,
         }
     }
 }
@@ -1258,6 +1263,7 @@ impl From<LaunchRequest> for AccLaunchRequest {
             worktree: r.worktree,
             sandbox: r.sandbox.map(Into::into),
             deny_instead_of_prompting: r.deny_instead_of_prompting,
+            system_prompt: r.system_prompt,
         }
     }
 }
