@@ -134,7 +134,7 @@ impl Session {
                 start_model = model;
                 (AnyDriver::Pi(d), spec)
             }
-            Harness::Cursor | Harness::Copilot | Harness::Opencode => {
+            Harness::Cursor | Harness::Copilot | Harness::Opencode | Harness::Antigravity => {
                 let start = match &opening {
                     Opening::New => Start::New,
                     Opening::Resume { native_id } => Start::Resume {

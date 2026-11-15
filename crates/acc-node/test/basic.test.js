@@ -22,7 +22,7 @@ test('makes session ids and lists the harnesses', () => {
   assert.match(newSessionId('claude', Buffer.alloc(15, 7)), /^claude-[a-z2-7]{24}$/)
   assert.deepStrictEqual(
     harnesses().map((h) => h.harness),
-    ['claude', 'codex', 'cursor', 'copilot', 'pi', 'opencode'],
+    ['claude', 'codex', 'cursor', 'copilot', 'pi', 'opencode', 'antigravity'],
   )
 })
 

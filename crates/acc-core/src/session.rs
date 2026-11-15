@@ -362,7 +362,7 @@ fn driver_for(spec: &SessionSpec, attach: bool, tag: &str) -> Box<dyn Driver> {
             }))
         }
         Harness::Pi => Box::new(PiDriver::with_id_prefix(tag)),
-        h @ (Harness::Cursor | Harness::Copilot | Harness::Opencode) => {
+        h @ (Harness::Cursor | Harness::Copilot | Harness::Opencode | Harness::Antigravity) => {
             let start = match (attach, resume) {
                 (true, _) => Start::Attach,
                 (false, Some(session_id)) => Start::Resume { session_id },
@@ -395,7 +395,7 @@ fn restore_driver(harness: Harness, state: Value) -> Result<Box<dyn Driver>, ser
         Harness::Claude => Box::new(serde_json::from_value::<ClaudeDriver>(state)?),
         Harness::Codex => Box::new(serde_json::from_value::<CodexDriver>(state)?),
         Harness::Pi => Box::new(serde_json::from_value::<PiDriver>(state)?),
-        Harness::Cursor | Harness::Copilot | Harness::Opencode => {
+        Harness::Cursor | Harness::Copilot | Harness::Opencode | Harness::Antigravity => {
             Box::new(serde_json::from_value::<AcpDriver>(state)?)
         }
     })

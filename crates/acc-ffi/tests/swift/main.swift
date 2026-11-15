@@ -19,7 +19,7 @@ let fixture = try! Data(contentsOf: root.appendingPathComponent(
     "crates/acc-core/tests/fixtures/claude/permission-deny.ndjson"))
 
 check(!accVersion().isEmpty, "version")
-check(harnesses().count == 6, "six harnesses")
+check(harnesses().count == 7, "seven harnesses")
 
 let session = try! Session(config: SessionConfig(harness: .claude, cwd: "/home/v/proj", opening: .new))
 check(session.launchSpec().program == "claude", "launch program")
