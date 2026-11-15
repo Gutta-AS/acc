@@ -516,6 +516,7 @@ mod tests {
         let req = AccLaunchRequest {
             sandbox: None,
             deny_instead_of_prompting: false,
+            system_prompt: None,
             harness: AccHarness::Claude,
             cwd: "/w".into(),
             model: None,
@@ -558,6 +559,7 @@ mod tests {
         let req = AccLaunchRequest {
             sandbox: None,
             deny_instead_of_prompting: false,
+            system_prompt: None,
             harness: AccHarness::Claude,
             cwd: "/w".into(),
             model: None,
@@ -611,6 +613,7 @@ mod tests {
         let req = AccLaunchRequest {
             sandbox: None,
             deny_instead_of_prompting: false,
+            system_prompt: None,
             harness: AccHarness::Claude,
             cwd: "/w".into(),
             model: None,
@@ -658,6 +661,7 @@ mod tests {
             AccLaunchRequest {
                 sandbox: None,
                 deny_instead_of_prompting: false,
+                system_prompt: None,
                 harness: AccHarness::Claude,
                 cwd: "/w".into(),
                 model: None,
@@ -699,6 +703,7 @@ mod tests {
             AccLaunchRequest {
                 sandbox: None,
                 deny_instead_of_prompting: false,
+                system_prompt: None,
                 harness: AccHarness::Claude,
                 cwd: "/w".into(),
                 model: None,
@@ -741,6 +746,7 @@ mod tests {
             AccLaunchRequest {
                 sandbox: None,
                 deny_instead_of_prompting: false,
+                system_prompt: None,
                 harness: AccHarness::Claude,
                 cwd: "/w".into(),
                 model: None,
