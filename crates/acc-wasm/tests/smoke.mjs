@@ -16,7 +16,7 @@ const root = new URL("../../../", import.meta.url);
 const fixture = readFileSync(new URL("crates/acc-core/tests/fixtures/claude/permission-deny.ndjson", root));
 
 assert.ok(acc.version());
-assert.deepEqual(acc.harnesses().map((h) => h.harness), ["claude", "codex", "cursor", "copilot", "pi", "opencode"]);
+assert.deepEqual(acc.harnesses().map((h) => h.harness), ["claude", "codex", "cursor", "copilot", "pi", "opencode", "antigravity"]);
 
 const session = new acc.Session({ harness: "claude", cwd: "/home/v/proj" });
 assert.equal(session.harness, "claude");

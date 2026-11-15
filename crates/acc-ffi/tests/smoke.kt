@@ -22,7 +22,7 @@ fun main(args: Array<String>) {
     val fixture = File(args[0], "crates/acc-core/tests/fixtures/claude/permission-deny.ndjson").readBytes()
 
     check(accVersion().isNotEmpty(), "version")
-    check(harnesses().size == 6, "six harnesses")
+    check(harnesses().size == 7, "seven harnesses")
 
     val session = Session(SessionConfig(Harness.CLAUDE, "/home/v/proj", Opening.New))
     check(session.launchSpec().program == "claude", "launch program")
