@@ -474,6 +474,9 @@ pub struct AccUpdate {
     pub item: Option<AccItemChange>,
     /// History being replayed while attaching: don't notify about it.
     pub replay: bool,
+    /// The event as JSON (a line of `acc run --json`), when the session
+    /// was asked for it with `AccSession::set_event_json`; `None` otherwise.
+    pub event_json: Option<String>,
 }
 
 impl From<Update> for AccUpdate {
@@ -482,6 +485,7 @@ impl From<Update> for AccUpdate {
             event: u.event.into(),
             item: u.item.map(Into::into),
             replay: u.replay,
+            event_json: None,
         }
     }
 }
