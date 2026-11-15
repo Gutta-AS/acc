@@ -537,6 +537,7 @@ mod tests {
                 Harness::Cursor,
                 Some("gpt-5"),
                 None,
+                None,
             )),
         );
         assert!(cursor.contains(

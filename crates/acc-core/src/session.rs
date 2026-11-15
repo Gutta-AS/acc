@@ -68,6 +68,10 @@ pub struct LaunchRequest {
     /// permission profile (`:workspace`) or approval policy (`never`), Cursor
     /// `yolo`/`auto-review`, opencode `auto`, Copilot `allow_all`.
     pub permission: Option<String>,
+    /// Agent persona to start with (Copilot `--agent`); other harnesses
+    /// ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     /// Harness session to resume (Claude session id, Codex thread id, ACP
     /// session id, pi session file).
     pub resume: Option<String>,
@@ -126,6 +130,9 @@ pub struct SessionSpec {
     pub launch: LaunchSpec,
     pub model: Option<String>,
     pub permission: Option<String>,
+    /// See [`LaunchRequest::agent`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
     pub resume: Option<String>,
     #[serde(default)]
     pub fork: bool,
@@ -169,6 +176,7 @@ impl SessionSpec {
             launch,
             model: None,
             permission: None,
+            agent: None,
             resume: None,
             fork: false,
             native_id: None,
@@ -365,6 +373,7 @@ fn driver_for(spec: &SessionSpec, attach: bool, tag: &str) -> Box<dyn Driver> {
             cfg.model = spec.model.clone();
             cfg.permission = spec.permission.clone();
             cfg.system_prompt = spec.system_prompt.clone();
+            cfg.agent = spec.agent.clone();
             Box::new(AcpDriver::new(h, cfg))
         }
     }
@@ -433,6 +442,7 @@ impl Session {
             },
             model: req.model.clone(),
             permission: req.permission.clone(),
+            agent: req.agent.clone(),
             resume: req.resume.clone(),
             fork: req.fork,
             native_id: if req.fork { None } else { req.resume.clone() },
@@ -448,7 +458,12 @@ impl Session {
         };
         let mut driver = driver_for(&spec, false, client_tag);
         spec.launch = match harness {
-            h if h.native_acp() => acp_launch(h, spec.model.as_deref(), spec.permission.as_deref()),
+            h if h.native_acp() => acp_launch(
+                h,
+                spec.model.as_deref(),
+                spec.permission.as_deref(),
+                spec.agent.as_deref(),
+            ),
             Harness::Codex => Harness::Codex.launch(None),
             _ => driver.launch(spec.resume.as_deref()),
         };
@@ -534,6 +549,7 @@ impl Session {
             cwd: spec.cwd.clone(),
             model: spec.model.clone(),
             permission: spec.permission.clone(),
+            agent: spec.agent.clone(),
             resume: Some(native_id),
             fork: false,
             title: spec.title.clone(),
@@ -931,6 +947,7 @@ impl Session {
             cwd: self.spec.cwd.clone(),
             model: model.or_else(|| self.spec.model.clone()),
             permission: self.spec.permission.clone(),
+            agent: self.spec.agent.clone(),
             resume: self.spec.native_id.clone().or_else(|| self.spec.resume.clone()),
             fork,
             title: self.spec.title.clone(),
