@@ -1182,7 +1182,7 @@ impl From<Support> for AccSandboxSupport {
 }
 
 /// What to start.
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+#[derive(Debug, Clone, PartialEq, uniffi::Record)]
 pub struct AccLaunchRequest {
     pub harness: AccHarness,
     /// Absolute for Cursor, Copilot and opencode (see `resolve_dir_exec`).
@@ -1230,6 +1230,49 @@ pub struct AccLaunchRequest {
     /// Codex, ACP agents; pi can't take them).
     #[uniffi(default = [])]
     pub mcp_servers: Vec<AccSessionMcpServer>,
+    /// Spend cap for this session as the harness's own launch flag (Claude
+    /// in USD, Copilot in credits); other harnesses can't take one.
+    #[uniffi(default = None)]
+    pub spend_cap: Option<AccSpendCap>,
+}
+
+/// A session's spend cap: `amount` above zero, in `unit`.
+#[derive(Debug, Clone, Copy, PartialEq, uniffi::Record)]
+pub struct AccSpendCap {
+    pub amount: f64,
+    pub unit: AccSpendUnit,
+}
+
+/// What an `AccSpendCap` counts in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, uniffi::Enum)]
+pub enum AccSpendUnit {
+    Usd,
+    /// The harness's own credits (Copilot AI credits).
+    Credits,
+}
+
+impl From<AccSpendCap> for acc_core::session::SpendCap {
+    fn from(c: AccSpendCap) -> Self {
+        Self {
+            amount: c.amount,
+            unit: match c.unit {
+                AccSpendUnit::Usd => acc_core::session::SpendUnit::Usd,
+                AccSpendUnit::Credits => acc_core::session::SpendUnit::Credits,
+            },
+        }
+    }
+}
+
+impl From<acc_core::session::SpendCap> for AccSpendCap {
+    fn from(c: acc_core::session::SpendCap) -> Self {
+        Self {
+            amount: c.amount,
+            unit: match c.unit {
+                acc_core::session::SpendUnit::Usd => AccSpendUnit::Usd,
+                acc_core::session::SpendUnit::Credits => AccSpendUnit::Credits,
+            },
+        }
+    }
 }
 
 /// A stdio MCP server for one session. `name` is 1-64 of
@@ -1288,6 +1331,7 @@ impl From<AccLaunchRequest> for LaunchRequest {
             deny_instead_of_prompting: r.deny_instead_of_prompting,
             system_prompt: r.system_prompt,
             mcp_servers: r.mcp_servers.into_iter().map(Into::into).collect(),
+            spend_cap: r.spend_cap.map(Into::into),
         }
     }
 }
@@ -1314,6 +1358,7 @@ impl From<LaunchRequest> for AccLaunchRequest {
             deny_instead_of_prompting: r.deny_instead_of_prompting,
             system_prompt: r.system_prompt,
             mcp_servers: r.mcp_servers.into_iter().map(Into::into).collect(),
+            spend_cap: r.spend_cap.map(Into::into),
         }
     }
 }
@@ -1371,7 +1416,7 @@ impl From<&SessionSpec> for AccSessionSpec {
 
 // Built once per action; boxing a launch request isn't worth the churn.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, uniffi::Enum)]
+#[derive(Debug, Clone, PartialEq, uniffi::Enum)]
 pub enum AccOutbound {
     /// Write these bytes with the session's `input_exec` (may be empty).
     Send { bytes: Vec<u8> },
