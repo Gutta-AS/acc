@@ -43,7 +43,9 @@ pub enum Event {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         started_at_ms: Option<u64>,
         /// The harness's own JSON for this frame, for debugging and
-        /// harness-specific UI. Nothing in ACC's model depends on it.
+        /// harness-specific UI. Nothing in ACC's model depends on it. A
+        /// user message with images carries ACC's refs to them here as
+        /// `images` (see [`crate::image`]); the bytes stay out.
         #[serde(default, skip_serializing_if = "Value::is_null")]
         native: Value,
     },

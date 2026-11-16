@@ -32,6 +32,7 @@ use crate::event::{
     Usage,
 };
 use crate::harness::{Harness, LaunchSpec};
+use crate::image;
 use crate::item::ItemFeed;
 use crate::ndjson::{Frame, LineFramer};
 use crate::state::{BlockKind, RunState, SessionState, StateSource};
@@ -522,8 +523,9 @@ impl PiDriver {
             Some("user") => {
                 self.msg_seq += 1;
                 let id = format!("u{}", self.msg_seq);
+                let images = image::native(&image::refs_in(msg.get("content")));
                 self.items
-                    .start(id.clone(), ItemKind::UserMessage, None, Value::Null, out);
+                    .start(id.clone(), ItemKind::UserMessage, None, images, out);
                 let text = user_text(msg.get("content"));
                 if !text.is_empty() {
                     self.items.delta(id, text, out);
@@ -1611,6 +1613,17 @@ mod tests {
             id: "u1".into(),
             text: "[image]".into()
         }));
+        let native = events
+            .iter()
+            .find_map(|e| match e {
+                Event::ItemStarted { native, .. } => Some(native),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            crate::image::refs_of(native),
+            [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
+        );
     }
 
     #[test]

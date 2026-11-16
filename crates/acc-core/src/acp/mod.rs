@@ -40,6 +40,7 @@ use crate::command::{
 use crate::driver::{Driver, DriverError};
 use crate::event::{Cost, Event, ItemId, ItemKind, PermissionOption, PermissionOptionKind, Plan, Usage};
 use crate::harness::{Harness, LaunchSpec};
+use crate::image::{self, ImageRef};
 use crate::item::ItemFeed;
 use crate::ndjson::{Frame, LineFramer};
 use crate::state::{BlockKind, RunState, SessionState, StateSource};
@@ -455,12 +456,13 @@ impl AcpDriver {
             } else {
                 text.clone()
             };
+            let refs = attachment_refs(&attachments);
             let bytes = self.request(
                 "_session/steering",
                 json!({ "sessionId": sid, "prompt": prompt }),
                 Pending::Steer { text, attachments },
             );
-            self.echo_steer(&shown);
+            self.echo_steer(&shown, refs);
             return Ok(bytes);
         }
         if !attachments.is_empty() && !self.prompt_images {
@@ -470,7 +472,7 @@ impl AcpDriver {
             });
         }
         let bytes = self.prompt(&text, &attachments)?;
-        self.echo_prompt(if text.is_empty() { "[image]" } else { &text });
+        self.echo_prompt(if text.is_empty() { "[image]" } else { &text }, &attachments);
         Ok(bytes)
     }
 
@@ -481,18 +483,19 @@ impl AcpDriver {
 
     /// Shows a steering prompt. It belongs to the turn already running, so
     /// unlike [`Self::echo_prompt`] it doesn't open another turn.
-    fn echo_steer(&mut self, text: &str) {
+    fn echo_steer(&mut self, text: &str, images: Value) {
         self.echo_seq += 1;
         self.history_next += 1;
         push_prompt(
             &mut self.items,
             format!("prompt-{}", self.echo_seq),
             text,
+            images,
             &mut self.echoes,
         );
     }
 
-    fn echo_prompt(&mut self, text: &str) {
+    fn echo_prompt(&mut self, text: &str, attachments: &[Attachment]) {
         self.echo_seq += 1;
         self.echoed_turns += 1;
         self.history_next += 1;
@@ -501,6 +504,7 @@ impl AcpDriver {
             &mut self.items,
             format!("prompt-{}", self.echo_seq),
             text,
+            attachment_refs(attachments),
             &mut self.echoes,
         );
     }
@@ -514,7 +518,7 @@ impl AcpDriver {
         let n = self.history_next;
         self.history_next += 1;
         if let Some(text) = self.history.get(n).cloned() {
-            push_prompt(&mut self.items, format!("history-{n}"), &text, out);
+            push_prompt(&mut self.items, format!("history-{n}"), &text, Value::Null, out);
         }
     }
 
@@ -2149,10 +2153,20 @@ fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Vec<Value> {
     prompt
 }
 
-fn push_prompt(items: &mut ItemFeed, id: ItemId, text: &str, out: &mut Vec<Event>) {
-    items.start(id.clone(), ItemKind::UserMessage, None, Value::Null, out);
+/// `native` holds the prompt's image refs ([`image::native`]).
+fn push_prompt(items: &mut ItemFeed, id: ItemId, text: &str, native: Value, out: &mut Vec<Event>) {
+    items.start(id.clone(), ItemKind::UserMessage, None, native, out);
     items.delta(id.clone(), text.to_owned(), out);
     items.complete(id, Value::Null, out);
+}
+
+fn attachment_refs(attachments: &[Attachment]) -> Value {
+    image::native(
+        &attachments
+            .iter()
+            .map(ImageRef::of_attachment)
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn line(v: &Value) -> Vec<u8> {

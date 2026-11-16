@@ -75,6 +75,8 @@ pub mod event;
 #[cfg(feature = "drivers")]
 pub mod handoff;
 #[cfg(feature = "drivers")]
+pub mod image;
+#[cfg(feature = "drivers")]
 pub mod item;
 #[cfg(feature = "drivers")]
 pub mod live;

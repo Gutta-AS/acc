@@ -42,6 +42,7 @@ use crate::event::{
     Plan, Quota, QuotaWindow, Usage,
 };
 use crate::harness::{Harness, LaunchSpec};
+use crate::image;
 use crate::item::ItemFeed;
 use crate::ndjson::{Frame, LineFramer};
 use crate::state::{BlockKind, RunState, SessionState, StateSource};
@@ -487,7 +488,8 @@ impl CodexDriver {
                 if let Some(item) = p.get("item")
                     && !self.subagent_finished(item, out)
                 {
-                    let ext = self.item_ext(item, &p);
+                    let mut ext = self.item_ext(item, &p);
+                    add_image_refs(item, &mut ext);
                     self.adopt_children(item);
                     let parent = self.parent_for(&p);
                     if let (Some(id), Some(kind)) = (owned(item, "id"), item_kind(item)) {
@@ -765,7 +767,9 @@ impl CodexDriver {
         let (Some(id), Some(kind)) = (owned(item, "id"), item_kind(item)) else {
             return;
         };
-        self.items.start(id.clone(), kind, None, Value::Null, out);
+        let mut native = Value::Null;
+        add_image_refs(item, &mut native);
+        self.items.start(id.clone(), kind, None, native, out);
         if let Some(text) = initial_text(item).or_else(|| final_text(item)) {
             self.items.delta(id.clone(), text, out);
         }
@@ -1577,6 +1581,21 @@ fn item_kind(item: &Value) -> Option<ItemKind> {
 /// A 0.162 `subAgentActivity` item of this `kind` (`started`, `completed`).
 fn is_activity(item: &Value, kind: &str) -> bool {
     str_at(item, "type") == Some("subAgentActivity") && str_at(item, "kind") == Some(kind)
+}
+
+/// A user message's image refs, as `images` in its native JSON
+/// ([`image::native`]), next to Codex's own keys.
+fn add_image_refs(item: &Value, native: &mut Value) {
+    if str_at(item, "type") != Some("userMessage") {
+        return;
+    }
+    let refs = image::refs_in(item.get("content"));
+    if let Value::Object(images) = image::native(&refs) {
+        match native {
+            Value::Object(n) => n.extend(images),
+            other => *other = Value::Object(images),
+        }
+    }
 }
 
 /// Text an item carries when it starts (user input has no delta stream).

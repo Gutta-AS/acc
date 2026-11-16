@@ -930,6 +930,23 @@ fn prompts_with_images_are_data_url_inputs() {
         id: "u9".into(),
         text: "[image]".into()
     }));
+    // Codex's own item JSON gains the image refs.
+    assert_eq!(
+        crate::image::refs_of(started_native(&events, "u9")),
+        [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
+    );
+    assert_eq!(started_native(&events, "u9")["type"], "userMessage");
+}
+
+/// The `native` of item `id`'s start.
+fn started_native<'a>(events: &'a [Event], id: &str) -> &'a serde_json::Value {
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::ItemStarted { id: i, native, .. } if i == id => Some(native),
+            _ => None,
+        })
+        .unwrap()
 }
 
 /// Recorded from 0.162.1 (`acc run codex`): the parent spawns one subagent,

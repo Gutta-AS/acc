@@ -1370,9 +1370,12 @@ fn images_need_the_agents_prompt_capability() {
         prompt["params"]["prompt"],
         json!([{ "type": "image", "mimeType": "image/png", "data": "UE5H" }])
     );
+    let events = d.take_events();
+    assert_eq!(prompts(&events), [("prompt-1".to_owned(), "[image]".to_owned())]);
+    // The echo carries a ref to the image, not the bytes.
     assert_eq!(
-        prompts(&d.take_events()),
-        [("prompt-1".to_owned(), "[image]".to_owned())]
+        crate::image::refs_of(started_native(&events, "prompt-1")),
+        [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
     );
 
     let both = one(&d
@@ -2150,4 +2153,15 @@ fn system_prompt_fails_the_session_when_the_agent_cant_take_it() {
     let events = feed(&mut d, &[result(init["id"].clone(), init_result(json!({})))]);
     assert!(states(&events).contains(&RunState::Error));
     assert!(d.poll_transmit().is_empty());
+}
+
+/// The `native` of item `id`'s start.
+fn started_native<'a>(events: &'a [Event], id: &str) -> &'a serde_json::Value {
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::ItemStarted { id: i, native, .. } if i == id => Some(native),
+            _ => None,
+        })
+        .unwrap()
 }
