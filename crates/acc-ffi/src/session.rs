@@ -6,6 +6,7 @@
 //! back into the app, so objects can live inside a Swift actor and be used
 //! from one task without any cross-thread callbacks.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use acc_core::detached::{self, FanInParser, FeedEntry};
@@ -45,6 +46,8 @@ fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
 pub struct AccSession {
     inner: Mutex<Session>,
     launch: Mutex<Option<AccExec>>,
+    /// Fill `AccUpdate::event_json` (see `set_event_json`).
+    event_json: AtomicBool,
 }
 
 #[uniffi::export]
@@ -62,6 +65,7 @@ impl AccSession {
         Ok(Arc::new(Self {
             inner: Mutex::new(session),
             launch: Mutex::new(Some(exec.into())),
+            event_json: AtomicBool::new(false),
         }))
     }
 
@@ -81,6 +85,7 @@ impl AccSession {
         Ok(Arc::new(Self {
             inner: Mutex::new(session),
             launch: Mutex::new(Some(exec.into())),
+            event_json: AtomicBool::new(false),
         }))
     }
 
@@ -93,6 +98,7 @@ impl AccSession {
         Ok(Arc::new(Self {
             inner: Mutex::new(Session::attach(spec, &client_tag)?),
             launch: Mutex::new(None),
+            event_json: AtomicBool::new(false),
         }))
     }
 
@@ -107,6 +113,7 @@ impl AccSession {
         Ok(Arc::new(Self {
             inner: Mutex::new(Session::restore(&snapshot, spec)?),
             launch: Mutex::new(None),
+            event_json: AtomicBool::new(false),
         }))
     }
 
@@ -163,13 +170,13 @@ impl AccSession {
     }
 
     pub fn on_status(&self, stdout: String, now_ms: u64) -> Vec<AccUpdate> {
-        convert(lock(&self.inner).on_status(&stdout, now_ms))
+        self.convert(lock(&self.inner).on_status(&stdout, now_ms))
     }
 
     /// The stdout of the launch exec. A session that asked for a sandbox
     /// but runs unconfined gets a notice.
     pub fn on_launched(&self, stdout: String) -> Vec<AccUpdate> {
-        convert(lock(&self.inner).on_launched(&stdout))
+        self.convert(lock(&self.inner).on_launched(&stdout))
     }
 
     /// What the host's sandbox applied, once a launch or status said.
@@ -179,12 +186,12 @@ impl AccSession {
 
     /// The content of the session's exit file, from a fan-in `SessionExit` entry.
     pub fn on_exit_file(&self, text: String, now_ms: u64) -> Vec<AccUpdate> {
-        convert(lock(&self.inner).on_exit_file(&text, now_ms))
+        self.convert(lock(&self.inner).on_exit_file(&text, now_ms))
     }
 
     /// Bytes of the log, starting at `offset`.
     pub fn feed(&self, bytes: Vec<u8>, now_ms: u64) -> Vec<AccUpdate> {
-        convert(lock(&self.inner).feed(&bytes, now_ms))
+        self.convert(lock(&self.inner).feed(&bytes, now_ms))
     }
 
     pub fn command(&self, command: AccCommand) -> Result<AccOutbound, AccError> {
@@ -194,7 +201,15 @@ impl AccSession {
     /// What the last command did that the harness won't report (the prompt
     /// of an ACP agent). Call after `command`; otherwise `feed` returns it.
     pub fn take_updates(&self, now_ms: u64) -> Vec<AccUpdate> {
-        convert(lock(&self.inner).take_updates(now_ms))
+        self.convert(lock(&self.inner).take_updates(now_ms))
+    }
+
+    /// Also give every update its event as JSON, the line `acc run --json`
+    /// would print, in `AccUpdate::event_json`. Off by default, so clients
+    /// that don't read it don't pay for it. For libraries that read ACC's
+    /// event JSON themselves (acc-ui's `SessionView.applyJson`).
+    pub fn set_event_json(&self, enabled: bool) {
+        self.event_json.store(enabled, Ordering::Relaxed);
     }
 
     /// Bytes to write to the harness now (send with `input_exec`).
@@ -265,7 +280,7 @@ impl AccSession {
         let policy = (!rules.is_empty()).then(|| Policy {
             rules: rules.into_iter().map(Into::into).collect(),
         });
-        convert(lock(&self.inner).set_policy(policy))
+        self.convert(lock(&self.inner).set_policy(policy))
     }
 
     /// Prints what the session changed in its worktree as a `git diff`
@@ -308,8 +323,20 @@ impl AccSession {
     }
 }
 
-fn convert(updates: Vec<acc_core::session::Update>) -> Vec<AccUpdate> {
-    updates.into_iter().map(Into::into).collect()
+impl AccSession {
+    fn convert(&self, updates: Vec<acc_core::session::Update>) -> Vec<AccUpdate> {
+        let json = self.event_json.load(Ordering::Relaxed);
+        updates
+            .into_iter()
+            .map(|u| {
+                let event_json = json.then(|| serde_json::to_string(&u.event).unwrap_or_default());
+                AccUpdate {
+                    event_json,
+                    ..u.into()
+                }
+            })
+            .collect()
+    }
 }
 
 /// Follows many files on a host over one channel (see `script`).
@@ -553,6 +580,51 @@ mod tests {
             AccOutbound::Relaunch { .. }
         ));
         assert!(b.options().iter().any(|o| o.id == AccOptionId::Model));
+    }
+
+    #[test]
+    fn event_json_is_opt_in() {
+        let req = AccLaunchRequest {
+            sandbox: None,
+            deny_instead_of_prompting: false,
+            system_prompt: None,
+            harness: AccHarness::Claude,
+            cwd: "/w".into(),
+            model: None,
+            permission: None,
+            agent: None,
+            resume: None,
+            fork: false,
+            title: None,
+            prompt: Some("hi".into()),
+            attachments: vec![],
+            parent: None,
+            replaces_parent: false,
+            labels: HashMap::new(),
+            launcher: None,
+            worktree: None,
+        };
+        let id = new_session_id(AccHarness::Claude, vec![7; 15]);
+        let spec = AccSession::launch(req, id, "ph".into(), 1).unwrap().spec().json;
+        let follow = |json: bool| {
+            let s = AccSession::attach(spec.clone(), "desk".into()).unwrap();
+            s.set_event_json(json);
+            s.on_status(format!("alive 3 {}", HI.len()), 2);
+            s.feed(HI.to_vec(), 3)
+        };
+
+        let plain = follow(false);
+        assert!(!plain.is_empty());
+        assert!(plain.iter().all(|u| u.event_json.is_none()));
+
+        let with_json = follow(true);
+        assert_eq!(with_json.len(), plain.len());
+        for u in &with_json {
+            let line = u.event_json.as_deref().unwrap();
+            // The same line `acc run --json` prints for the event.
+            let event: acc_core::event::Event = serde_json::from_str(line).unwrap();
+            assert_eq!(serde_json::to_string(&event).unwrap(), line);
+        }
     }
 
     #[test]
