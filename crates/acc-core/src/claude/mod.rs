@@ -41,6 +41,7 @@ use crate::event::{
     Plan, Quota, QuotaWindow, Usage,
 };
 use crate::harness::{Harness, LaunchSpec};
+use crate::image::{self, ImageRef};
 use crate::item::ItemFeed;
 use crate::ndjson::{Frame, LineFramer};
 use crate::state::{BlockKind, RunState, SessionState, StateSource};
@@ -693,7 +694,7 @@ impl ClaudeDriver {
         let content = v.pointer("/message/content").cloned().unwrap_or(Value::Null);
         if let Some(blocks) = content.as_array() {
             let mut text = String::new();
-            let mut images = 0;
+            let mut images = Vec::new();
             for block in blocks {
                 match str_at(block, "type") {
                     Some("tool_result") => {
@@ -727,14 +728,15 @@ impl ClaudeDriver {
                         }
                     }
                     Some("text") => text.push_str(str_at(block, "text").unwrap_or_default()),
-                    Some("image") => images += 1,
+                    Some("image") => images.extend(ImageRef::of_block(block)),
                     _ => {}
                 }
             }
+            let native = image::native(&images);
             if !text.is_empty() {
-                self.user_message(v, &text, out);
-            } else if images > 0 {
-                self.user_message(v, IMAGE_PLACEHOLDER, out);
+                self.user_message(v, &text, native, out);
+            } else if !images.is_empty() {
+                self.user_message(v, IMAGE_PLACEHOLDER, native, out);
             }
         } else if let Some(text) = content.as_str() {
             if text.trim_start().starts_with("<task-notification>") {
@@ -747,12 +749,13 @@ impl ClaudeDriver {
                     message: output.to_owned(),
                 });
             } else {
-                self.user_message(v, text, out);
+                self.user_message(v, text, Value::Null, out);
             }
         }
     }
 
-    fn user_message(&mut self, v: &Value, text: &str, out: &mut Vec<Event>) {
+    /// `native` holds the message's image refs ([`image::native`]).
+    fn user_message(&mut self, v: &Value, text: &str, native: Value, out: &mut Vec<Event>) {
         if v.get("isSynthetic").and_then(Value::as_bool) == Some(true) {
             return;
         }
@@ -767,7 +770,7 @@ impl ClaudeDriver {
             self.set_state(RunState::Working { progress: None }, None, out);
         }
         self.items
-            .start(id.clone(), ItemKind::UserMessage, parent, Value::Null, out);
+            .start(id.clone(), ItemKind::UserMessage, parent, native, out);
         self.items.delta(id.clone(), text.to_owned(), out);
         self.items.complete(id, Value::Null, out);
     }

@@ -1139,6 +1139,22 @@ fn prompts_with_images_are_content_blocks() {
         id: "img-1".into(),
         text: "[image]".into()
     }));
+    // It carries a ref to the image, not the bytes.
+    assert_eq!(
+        crate::image::refs_of(started_native(&events, "img-1")),
+        [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
+    );
+}
+
+/// The `native` of item `id`'s start.
+fn started_native<'a>(events: &'a [Event], id: &str) -> &'a serde_json::Value {
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::ItemStarted { id: i, native, .. } if i == id => Some(native),
+            _ => None,
+        })
+        .unwrap()
 }
 
 /// Claude Code 2.1.280 with `--forward-subagent-text`: a foreground and a
