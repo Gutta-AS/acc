@@ -1144,6 +1144,16 @@ fn prompts_with_images_are_content_blocks() {
         crate::image::refs_of(started_native(&events, "img-1")),
         [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
     );
+    // A restored transcript still has it.
+    let mut t = crate::transcript::Transcript::new();
+    for e in &events {
+        t.apply(e);
+    }
+    let t: crate::transcript::Transcript = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+    assert_eq!(
+        t.get("img-1").unwrap().images,
+        [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
+    );
 }
 
 /// The `native` of item `id`'s start.

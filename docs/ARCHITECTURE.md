@@ -87,7 +87,10 @@ ACP as `image` blocks when the agent advertised `promptCapabilities.image` (Curs
 opencode do; otherwise `DriverError::Unsupported`), pi as the prompt's `images`. Harnesses echo
 the prompt into the session log, where a line over 16 MiB is dropped, so `validate_attachments`
 rejects an image over 5 MiB or a prompt over 10 MiB (`DriverError::AttachmentRejected`); clients
-resize first. Transcripts show a prompt's text, or `[image]` when it had none.
+resize first. Transcripts show a prompt's text, or `[image]` when it had none. A user message
+with images carries ACC's `image::ImageRef`s (media type, size, SHA-256, or the host path) in its
+`ItemStarted` `native` as `images`, never the bytes, and the transcript's `Item` keeps them as
+`images` (left out of the JSON when empty), so a restored session still has them.
 
 ### ACP driver (Cursor, Copilot, opencode)
 

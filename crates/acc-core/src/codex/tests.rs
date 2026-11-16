@@ -1122,3 +1122,28 @@ fn collab_spawn_is_a_subagent_and_child_thread_items_belong_to_it() {
     assert_eq!(model.as_deref(), Some("gpt-6.1-sol"));
     assert_eq!(t.children("call_spawn").count(), 1);
 }
+
+#[test]
+fn restored_transcripts_keep_history_image_refs() {
+    let mut d = CodexDriver::new(CodexConfig {
+        resume: Some("t".into()),
+        ..CodexConfig::default()
+    });
+    d.handshake();
+    let events = feed(
+        &mut d,
+        json!({"id": 2, "result": {"model": "gpt-6.1-sol", "thread": {"id": "t", "turns": [{"id": "u", "status": "completed", "items": [
+        {"type": "userMessage", "id": "i1", "content": [{"type": "image", "url": "data:image/png;base64,UE5H"}]}]}]}}}),
+    );
+    // The completion repeats the item without the refs; the transcript
+    // keeps them, through a snapshot too.
+    let mut t = crate::transcript::Transcript::new();
+    for e in &events {
+        t.apply(e);
+    }
+    let t: crate::transcript::Transcript = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+    assert_eq!(
+        t.get("i1").unwrap().images,
+        [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
+    );
+}

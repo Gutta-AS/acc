@@ -13,6 +13,7 @@ use serde_json::Value;
 
 pub use crate::event::ItemStatus;
 use crate::event::{Event, ItemId, ItemKind};
+use crate::image::{self, ImageRef};
 use crate::item::{ItemDetail, merge};
 use crate::state::RunState;
 
@@ -41,9 +42,25 @@ pub struct Item {
     /// `None` until then, and where it doesn't time items.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_at_ms: Option<u64>,
+    /// ACC's refs to the images a user message carried (see
+    /// [`crate::image`]), kept from its `native` so a restored transcript
+    /// still has them. Empty, and left out of the JSON, otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ImageRef>,
 }
 
 impl Item {
+    /// Keeps the image refs a user message's frame carries; a frame
+    /// without them leaves the ones already kept.
+    fn keep_images(&mut self, native: &Value) {
+        if self.kind == ItemKind::UserMessage {
+            let refs = image::refs_of(native);
+            if !refs.is_empty() {
+                self.images = refs;
+            }
+        }
+    }
+
     /// How long the item ran, when the harness timed both ends.
     pub fn duration_ms(&self) -> Option<u64> {
         Some(self.completed_at_ms?.saturating_sub(self.started_at_ms?))
@@ -105,6 +122,13 @@ impl From<Stored> for Transcript {
             index: HashMap::new(),
             next_seq: s.next_seq,
         };
+        // Transcripts saved before items kept their image refs still have
+        // them in `native`.
+        for item in t.items.iter_mut().filter(|i| i.images.is_empty()) {
+            let native = std::mem::take(&mut item.native);
+            item.keep_images(&native);
+            item.native = native;
+        }
         t.reindex();
         t
     }
@@ -240,6 +264,7 @@ impl Transcript {
             seq: self.next_seq,
             started_at_ms: None,
             completed_at_ms: None,
+            images: Vec::new(),
         });
         let last = self.items.len() - 1;
         (&mut self.items[last], true)
@@ -264,6 +289,7 @@ impl Transcript {
                 }
                 item.detail = detail.clone();
                 merge(&mut item.native, native);
+                item.keep_images(native);
                 if parent.is_some() {
                     item.parent.clone_from(parent);
                 }
@@ -286,6 +312,7 @@ impl Transcript {
                 let item = &mut self.items[i];
                 item.detail = detail.clone();
                 merge(&mut item.native, native);
+                item.keep_images(native);
                 Some(ItemChange::Updated { id: id.clone() })
             }
             Event::ItemCompleted {
@@ -303,6 +330,7 @@ impl Transcript {
                 }
                 item.detail = detail.clone();
                 merge(&mut item.native, native);
+                item.keep_images(native);
                 Some(ItemChange::Completed { id: id.clone() })
             }
             _ => None,
@@ -503,6 +531,64 @@ mod tests {
             [ItemChange::Completed { id: "t".into() }]
         );
         assert_eq!(f.t.get("t").unwrap().status, ItemStatus::Completed);
+    }
+
+    #[test]
+    fn user_messages_keep_their_image_refs_through_a_snapshot() {
+        let png = ImageRef::of_bytes(Some("image/png"), b"PNG");
+        let mut f = Fed::new(Harness::Claude);
+        f.run(|i, o| {
+            i.start(
+                "p",
+                ItemKind::UserMessage,
+                None,
+                image::native(std::slice::from_ref(&png)),
+                o,
+            )
+        });
+        f.run(|i, o| i.delta("p", "[image]", o));
+        // A later frame without refs keeps them.
+        f.run(|i, o| i.complete("p", json!({"uuid": "p"}), o));
+        f.run(|i, o| i.start("q", ItemKind::UserMessage, None, Value::Null, o));
+        assert_eq!(f.t.get("p").unwrap().images, std::slice::from_ref(&png));
+        assert!(f.t.get("q").unwrap().images.is_empty());
+
+        let json = serde_json::to_value(&f.t).unwrap();
+        assert_eq!(json["items"][0]["images"], json!([png]));
+        assert!(json["items"][1].get("images").is_none(), "no key without images");
+        let back: Transcript = serde_json::from_value(json).unwrap();
+        assert_eq!(back.items(), f.t.items());
+    }
+
+    #[test]
+    fn items_without_images_serialize_as_before() {
+        let mut t = Transcript::new();
+        t.apply(&Event::ItemStarted {
+            id: "p".into(),
+            kind: ItemKind::UserMessage,
+            parent: None,
+            detail: ItemDetail::Text,
+            started_at_ms: None,
+            native: Value::Null,
+        });
+        assert_eq!(
+            serde_json::to_string(&t).unwrap(),
+            r#"{"items":[{"id":"p","kind":"user_message","status":"running","text":"","detail":{"type":"text"},"native":null,"parent":null,"seq":1}],"next_seq":1}"#
+        );
+    }
+
+    #[test]
+    fn older_transcripts_find_image_refs_in_native() {
+        let png = ImageRef::of_bytes(Some("image/png"), b"PNG");
+        let old = json!({"items": [
+            {"id": "p", "kind": "user_message", "status": "completed", "text": "[image]",
+             "detail": {"type": "text"}, "native": image::native(std::slice::from_ref(&png)), "parent": null, "seq": 1},
+            {"id": "a", "kind": "agent_message", "status": "completed", "text": "ok",
+             "detail": {"type": "text"}, "native": {"images": [png]}, "parent": null, "seq": 2},
+        ], "next_seq": 2});
+        let t: Transcript = serde_json::from_value(old).unwrap();
+        assert_eq!(t.get("p").unwrap().images, [png]);
+        assert!(t.get("a").unwrap().images.is_empty(), "only user messages");
     }
 
     #[test]
