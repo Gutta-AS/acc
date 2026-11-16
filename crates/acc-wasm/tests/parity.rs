@@ -66,10 +66,16 @@ fn exports(crate_dir: &str, attr: &str) -> BTreeSet<String> {
 /// their own transport with `Session` or `AccSession` instead.
 const SSH_TRANSPORT: [&str; 2] = ["SshHost::", "RemoteSession::"];
 
+/// acc-ffi methods with no wasm counterpart because JS already has what
+/// they give: `AccSession.feed` returns updates as JSON, so the event JSON
+/// that `set_event_json` adds to FFI updates is there already.
+const FFI_ONLY: [&str; 1] = ["AccSession::set_event_json"];
+
 #[test]
 fn ffi_and_wasm_export_the_same_api() {
     let mut ffi = exports("acc-ffi", "#[uniffi::export");
     ffi.retain(|name| !SSH_TRANSPORT.iter().any(|t| name.starts_with(t)));
+    ffi.retain(|name| !FFI_ONLY.contains(&name.as_str()));
     let wasm = exports("acc-wasm", "#[wasm_bindgen");
     assert!(ffi.contains("AccSession::feed") && wasm.contains("AccSession::feed"));
     let only_ffi: Vec<_> = ffi.difference(&wasm).collect();
