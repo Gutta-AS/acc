@@ -45,6 +45,7 @@ use crate::harness::{Harness, LaunchSpec};
 use crate::image;
 use crate::item::ItemFeed;
 use crate::ndjson::{Frame, LineFramer};
+use crate::session::SessionMcpServer;
 use crate::state::{BlockKind, RunState, SessionState, StateSource};
 use crate::wire::{self, owned, str_at, title_at, u64_at};
 
@@ -72,6 +73,10 @@ pub struct CodexConfig {
     /// instructions (the launch system prompt).
     #[serde(default)]
     pub developer_instructions: Option<String>,
+    /// MCP servers for this thread only, as `config` overrides
+    /// (`mcp_servers.<name>`) on `thread/start` and `thread/resume`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<SessionMcpServer>,
     /// Prefix for this client's request ids. With a tag, ids are strings
     /// (`<tag>-<n>`) so clients sharing one detached session never mistake
     /// each other's responses in the shared log. Without one, ids are numbers.
@@ -248,7 +253,24 @@ impl CodexDriver {
                 p.insert(key.into(), Value::String(v.clone()));
             }
         }
+        if let Some(config) = self.mcp_config() {
+            p.insert("config".into(), config);
+        }
         Value::Object(p)
+    }
+
+    /// The session's MCP servers as a thread's `config` overrides, one
+    /// `mcp_servers.<name>` key each so the user's servers stay.
+    fn mcp_config(&self) -> Option<Value> {
+        let servers = &self.config.mcp_servers;
+        (!servers.is_empty()).then(|| {
+            Value::Object(
+                servers
+                    .iter()
+                    .map(|s| (format!("mcp_servers.{}", s.name), s.config()))
+                    .collect(),
+            )
+        })
     }
 
     fn set_state(&mut self, state: RunState, message: Option<String>, out: &mut Vec<Event>) {
@@ -1389,6 +1411,9 @@ impl Driver for CodexDriver {
                 p.insert("threadId".into(), json!(thread));
                 if let Some(i) = &self.config.developer_instructions {
                     p.insert("developerInstructions".into(), json!(i));
+                }
+                if let Some(config) = self.mcp_config() {
+                    p.insert("config".into(), config);
                 }
                 Ok(self.request("thread/fork", Value::Object(p), Req::Thread))
             }

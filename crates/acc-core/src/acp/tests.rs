@@ -2165,3 +2165,41 @@ fn started_native<'a>(events: &'a [Event], id: &str) -> &'a serde_json::Value {
         })
         .unwrap()
 }
+
+#[test]
+fn session_mcp_servers_ride_along_when_a_session_opens() {
+    let mut cfg = AcpConfig::new("/home/v/proj", Start::New);
+    cfg.mcp_servers = vec![crate::session::SessionMcpServer {
+        name: "acc_ui".into(),
+        command: "sh".into(),
+        args: vec!["/s.sh".into()],
+        env: [("ACC_UI_SESSION".to_owned(), "s1".to_owned())].into(),
+    }];
+    let mut d = AcpDriver::new(Harness::Copilot, cfg);
+    let init = one(&d.handshake());
+    feed(
+        &mut d,
+        &[result(
+            init["id"].clone(),
+            init_result(json!({ "loadSession": true })),
+        )],
+    );
+    let new = one(&d.poll_transmit());
+    assert_eq!(new["method"], "session/new");
+    assert_eq!(
+        new["params"]["mcpServers"],
+        json!([{ "name": "acc_ui", "command": "sh", "args": ["/s.sh"],
+            "env": [{ "name": "ACC_UI_SESSION", "value": "s1" }] }])
+    );
+    // Without servers the list stays empty, as before.
+    let mut d = driver(Harness::Copilot, Start::New);
+    let init = one(&d.handshake());
+    feed(
+        &mut d,
+        &[result(
+            init["id"].clone(),
+            init_result(json!({ "loadSession": true })),
+        )],
+    );
+    assert_eq!(one(&d.poll_transmit())["params"]["mcpServers"], json!([]));
+}

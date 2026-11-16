@@ -43,6 +43,7 @@ use crate::harness::{Harness, LaunchSpec};
 use crate::image::{self, ImageRef};
 use crate::item::ItemFeed;
 use crate::ndjson::{Frame, LineFramer};
+use crate::session::SessionMcpServer;
 use crate::state::{BlockKind, RunState, SessionState, StateSource};
 use crate::wire::{one_line, str_at, title_at};
 
@@ -98,6 +99,10 @@ pub struct AcpConfig {
     /// advertise `sessionCapabilities.systemPrompt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub system_prompt: Option<String>,
+    /// MCP servers for this session only, sent as `mcpServers` whenever a
+    /// session opens (new, load, resume, fork).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mcp_servers: Vec<SessionMcpServer>,
     /// Agent persona passed at spawn (Copilot `--agent`): its prompt and
     /// tools apply from startup.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -113,6 +118,7 @@ impl AcpConfig {
             model: None,
             permission: None,
             system_prompt: None,
+            mcp_servers: Vec::new(),
             agent: None,
         }
     }
@@ -391,7 +397,7 @@ impl AcpDriver {
     /// Params of a `session/new`, `session/load` or `session/resume`: the
     /// launch system prompt rides along in `append` mode.
     fn session_params(&self, session_id: Option<&str>) -> Value {
-        let mut p = json!({ "cwd": self.cfg.cwd, "mcpServers": [] });
+        let mut p = json!({ "cwd": self.cfg.cwd, "mcpServers": self.mcp_servers() });
         if let Some(id) = session_id {
             p["sessionId"] = json!(id);
         }
@@ -402,6 +408,11 @@ impl AcpDriver {
             });
         }
         p
+    }
+
+    /// `mcpServers` for a session that opens.
+    fn mcp_servers(&self) -> Vec<Value> {
+        self.cfg.mcp_servers.iter().map(SessionMcpServer::acp).collect()
     }
 
     fn open_session(&mut self) -> Vec<u8> {
@@ -1933,7 +1944,7 @@ impl Driver for AcpDriver {
                 let cwd = self.cfg.cwd.clone();
                 Ok(self.request(
                     "session/fork",
-                    json!({ "sessionId": sid, "cwd": cwd, "mcpServers": [] }),
+                    json!({ "sessionId": sid, "cwd": cwd, "mcpServers": self.mcp_servers() }),
                     Pending::Fork,
                 ))
             }
