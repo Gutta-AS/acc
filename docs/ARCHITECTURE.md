@@ -367,6 +367,14 @@ only; replacing it is not offered). Claude and pi get `--append-system-prompt`, 
 doesn't makes the session fail to open (state `error`) rather than run without the instructions. The text is kept
 in `spec.json` and carried over by revive, fork, restart and handoff.
 
+**Session MCP servers.** `LaunchRequest::mcp_servers` adds stdio MCP servers for one session, next to the
+ones the harness has configured (which `acc-loadout` manages): Claude gets one `--mcp-config=<json>` argument,
+Codex `config` overrides (one `mcp_servers.<name>` key each, so the user's servers stay) on `thread/start`,
+`resume` and `fork`, and ACP agents the list as `mcpServers` on `session/new`, `load`, `resume` and `fork`.
+pi has no MCP, so launching pi with servers is refused, and a handoff to pi leaves them out. Names are 1-64 of
+`A-Z a-z 0-9 _ -`. They are kept in `spec.json` and carried over by revive, fork, restart and handoff; without
+any, nothing in the launch changes.
+
 **Worktrees.** Several agents can work on one repository at once, each in a git worktree of its
 own. `worktree::add_script(cwd, name, base)` (`worktree_add_exec` in the bindings; use the session
 id as the name) makes `~/.acc/w/<name>` on branch `acc/<name>` from `base` (default `HEAD`) and

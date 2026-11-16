@@ -1226,6 +1226,44 @@ pub struct AccLaunchRequest {
     /// pi, Codex, and ACP agents that advertise it).
     #[uniffi(default = None)]
     pub system_prompt: Option<String>,
+    /// MCP servers for this session only, next to the harness's own (Claude,
+    /// Codex, ACP agents; pi can't take them).
+    #[uniffi(default = [])]
+    pub mcp_servers: Vec<AccSessionMcpServer>,
+}
+
+/// A stdio MCP server for one session. `name` is 1-64 of
+/// `A-Z a-z 0-9 _ -`.
+#[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
+pub struct AccSessionMcpServer {
+    pub name: String,
+    pub command: String,
+    #[uniffi(default = [])]
+    pub args: Vec<String>,
+    #[uniffi(default)]
+    pub env: HashMap<String, String>,
+}
+
+impl From<AccSessionMcpServer> for acc_core::session::SessionMcpServer {
+    fn from(s: AccSessionMcpServer) -> Self {
+        Self {
+            name: s.name,
+            command: s.command,
+            args: s.args,
+            env: s.env.into_iter().collect(),
+        }
+    }
+}
+
+impl From<acc_core::session::SessionMcpServer> for AccSessionMcpServer {
+    fn from(s: acc_core::session::SessionMcpServer) -> Self {
+        Self {
+            name: s.name,
+            command: s.command,
+            args: s.args,
+            env: s.env.into_iter().collect(),
+        }
+    }
 }
 
 impl From<AccLaunchRequest> for LaunchRequest {
@@ -1249,6 +1287,7 @@ impl From<AccLaunchRequest> for LaunchRequest {
             sandbox: r.sandbox.map(Into::into),
             deny_instead_of_prompting: r.deny_instead_of_prompting,
             system_prompt: r.system_prompt,
+            mcp_servers: r.mcp_servers.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -1274,6 +1313,7 @@ impl From<LaunchRequest> for AccLaunchRequest {
             sandbox: r.sandbox.map(Into::into),
             deny_instead_of_prompting: r.deny_instead_of_prompting,
             system_prompt: r.system_prompt,
+            mcp_servers: r.mcp_servers.into_iter().map(Into::into).collect(),
         }
     }
 }
