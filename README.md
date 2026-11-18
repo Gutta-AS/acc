@@ -172,6 +172,8 @@ Any client can join later with `AccSession.attach(specJson:clientTag:)` (specs c
 `listSessionsExec()`): the log is replayed through a fresh driver without re-answering anything,
 then the session is live. Persist `session.snapshot()` and pass it to
 `AccSession.restore(snapshot:specJson:)` after a relaunch to replay only what the log gained since.
+`session.setEventJson(enabled: true)` also gives every update its event as the line `acc run --json`
+prints (`AccUpdate.eventJson`), for clients that read ACC's event JSON themselves.
 `LaunchRequest.labels` keeps notes of the app's own with the session (where it came from, say);
 they are stored in `spec.json` and carried over to relaunches.
 

@@ -3,7 +3,7 @@
 ## Goals and constraints
 
 - Control, observe and configure **CLI/TUI** agent harnesses: Claude Code, Codex, Cursor Agent,
-  Copilot CLI, pi, opencode. IDE integrations are out of scope for now.
+  Copilot CLI, pi, opencode, Antigravity CLI. IDE integrations are out of scope for now.
 - Embed natively on iOS and Android, and run on web and desktop. **Performance and stability** are
   the top criteria.
 - **Install nothing on hosts.** A phone (for example an iOS SSH app embedding ACC) must be able to
@@ -87,9 +87,14 @@ ACP as `image` blocks when the agent advertised `promptCapabilities.image` (Curs
 opencode do; otherwise `DriverError::Unsupported`), pi as the prompt's `images`. Harnesses echo
 the prompt into the session log, where a line over 16 MiB is dropped, so `validate_attachments`
 rejects an image over 5 MiB or a prompt over 10 MiB (`DriverError::AttachmentRejected`); clients
-resize first. Transcripts show a prompt's text, or `[image]` when it had none.
+resize first. Transcripts show a prompt's text, or `[image]` when it had none. The bytes never
+come back in events: a user message with images carries ACC's `image::ImageRef`s in its
+`ItemStarted` `native` as `{"images": [...]}` (media type, decoded size and SHA-256 when the bytes
+were inline, the host path for Codex's `localImage`; Codex keeps its own item JSON and gains the
+`images` key), so the client that sent the prompt matches its attachments by `sha256`. Messages
+without images are unchanged.
 
-### ACP driver (Cursor, Copilot, opencode)
+### ACP driver (Cursor, Copilot, opencode, Antigravity)
 
 `acc_core::acp::AcpDriver` speaks ACP protocol version 1 (schema 1.29, `@agentclientprotocol/sdk` 2.2.0). It
 sends `initialize`, then opens the session itself (`session/new`, or `session/load` / `session/resume`
@@ -212,7 +217,9 @@ The second layer is the detached-session byte pump over `acc_core::session::Sess
 permissions), `AccFanIn` (many logs on one channel) and the host scripts, where the app runs the scripts ACC hands it over its own channels. Both
 bindings expose the same objects and functions under the same names; `acc-wasm/tests/parity.rs`
 fails when they differ, except for the SSH transport objects below, which a browser can't use (no
-raw sockets). In JS, records are plain objects and errors from this layer are `Error`s named
+raw sockets), and `AccSession::set_event_json`: it fills `AccUpdate::event_json` with each event as
+the line `acc run --json` prints, for FFI clients that read ACC's event JSON themselves (off by
+default; JS updates are that JSON already). In JS, records are plain objects and errors from this layer are `Error`s named
 `AccError` whose `kind` is the FFI's `AccError` variant.
 
 `acc-ffi` also carries the SSH transport (`acc-ssh`), so a phone app needs nothing else to drive a
