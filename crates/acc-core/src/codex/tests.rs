@@ -317,6 +317,40 @@ fn turn_lifecycle_and_sticky_done() {
 }
 
 #[test]
+fn stale_turn_completed_does_not_end_the_current_turn() {
+    let mut d = started();
+    feed(
+        &mut d,
+        json!({"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": "t1"}}}),
+    );
+    let interrupt = sent(&d.command(Command::Interrupt).unwrap());
+    assert_eq!(interrupt[0]["method"], "turn/interrupt");
+    let first = feed(
+        &mut d,
+        json!({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": "t1", "status": "interrupted"}}}),
+    );
+    assert!(first.contains(&Event::TurnCompleted));
+    feed(
+        &mut d,
+        json!({"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": "t2"}}}),
+    );
+    // Older Codex replays the interrupted turn's completion late.
+    let stale = feed(
+        &mut d,
+        json!({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": "t1", "status": "interrupted"}}}),
+    );
+    assert!(stale.is_empty());
+    // The current turn is still interruptible, i.e. `turn_id` survived.
+    let again = sent(&d.command(Command::Interrupt).unwrap());
+    assert_eq!(again[0]["params"]["turnId"], "t2");
+    let done = feed(
+        &mut d,
+        json!({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": "t2", "status": "completed"}}}),
+    );
+    assert!(done.contains(&Event::TurnCompleted));
+}
+
+#[test]
 fn failed_turn_is_error_with_message() {
     let mut d = started();
     let events = feed(

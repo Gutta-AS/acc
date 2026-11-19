@@ -492,6 +492,15 @@ impl CodexDriver {
                 self.set_state(RunState::Working { progress: None }, None, out);
             }
             "turn/completed" if ours => {
+                // Codex before 0.169 can deliver the late completion of an
+                // interrupted turn after the next one started; it must not
+                // end the current turn.
+                let done_id = p.pointer("/turn/id").and_then(Value::as_str);
+                if let (Some(cur), Some(done)) = (self.turn_id.as_deref(), done_id)
+                    && cur != done
+                {
+                    return;
+                }
                 self.turn_id = None;
                 let turn = p.get("turn").cloned().unwrap_or(Value::Null);
                 match str_at(&turn, "status") {
