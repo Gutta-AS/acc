@@ -302,6 +302,8 @@ export interface SessionSpec {
   labels?: Record<string, string>;
   worktree?: string;
   deny_instead_of_prompting?: boolean;
+  /** Spend cap passed as the harness's launch flag: Claude in `usd`, Copilot in `credits`. */
+  spend_cap?: { amount: number; unit: "usd" | "credits" };
 }
 
 /** A detached session on a host. */

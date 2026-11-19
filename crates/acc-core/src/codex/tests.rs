@@ -317,6 +317,40 @@ fn turn_lifecycle_and_sticky_done() {
 }
 
 #[test]
+fn stale_turn_completed_does_not_end_the_current_turn() {
+    let mut d = started();
+    feed(
+        &mut d,
+        json!({"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": "t1"}}}),
+    );
+    let interrupt = sent(&d.command(Command::Interrupt).unwrap());
+    assert_eq!(interrupt[0]["method"], "turn/interrupt");
+    let first = feed(
+        &mut d,
+        json!({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": "t1", "status": "interrupted"}}}),
+    );
+    assert!(first.contains(&Event::TurnCompleted));
+    feed(
+        &mut d,
+        json!({"method": "turn/started", "params": {"threadId": THREAD, "turn": {"id": "t2"}}}),
+    );
+    // Older Codex replays the interrupted turn's completion late.
+    let stale = feed(
+        &mut d,
+        json!({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": "t1", "status": "interrupted"}}}),
+    );
+    assert!(stale.is_empty());
+    // The current turn is still interruptible, i.e. `turn_id` survived.
+    let again = sent(&d.command(Command::Interrupt).unwrap());
+    assert_eq!(again[0]["params"]["turnId"], "t2");
+    let done = feed(
+        &mut d,
+        json!({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": "t2", "status": "completed"}}}),
+    );
+    assert!(done.contains(&Event::TurnCompleted));
+}
+
+#[test]
 fn failed_turn_is_error_with_message() {
     let mut d = started();
     let events = feed(
@@ -663,6 +697,34 @@ fn resumed_history_is_replayed_as_items() {
         id: "i2".into(),
         text: "Fixed.".into()
     }));
+    // Without images the item rides along untouched.
+    assert_eq!(
+        completed_native(&events, "i1"),
+        &json!({"type": "userMessage", "id": "i1", "content": [{"type": "text", "text": "fix it", "text_elements": []}]})
+    );
+}
+
+#[test]
+fn resumed_history_images_are_refs_without_data_urls() {
+    let mut d = CodexDriver::new(CodexConfig {
+        resume: Some("t".into()),
+        ..CodexConfig::default()
+    });
+    d.handshake();
+    let events = feed(
+        &mut d,
+        json!({"id": 2, "result": {"model": "gpt-6.1-sol", "thread": {"id": "t", "turns": [{"id": "u", "status": "completed", "items": [
+        {"type": "userMessage", "id": "i1", "content": [{"type": "image", "url": "data:image/png;base64,UE5H"}]}]}]}}}),
+    );
+    assert_eq!(
+        crate::image::refs_of(started_native(&events, "i1")),
+        [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
+    );
+    assert_eq!(
+        completed_native(&events, "i1")["content"],
+        json!([{"type": "image"}])
+    );
+    assert!(!format!("{events:?}").contains("UE5H"));
 }
 
 #[test]
@@ -936,6 +998,41 @@ fn prompts_with_images_are_data_url_inputs() {
         [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
     );
     assert_eq!(started_native(&events, "u9")["type"], "userMessage");
+    // The bytes don't ride along: the data URL is gone, the block stays.
+    assert_eq!(
+        started_native(&events, "u9")["content"],
+        json!([{"type": "image"}])
+    );
+    let done = feed(
+        &mut d,
+        json!({"method": "item/completed", "params": {"threadId": THREAD, "turnId": "t1",
+        "item": {"type": "userMessage", "id": "u9", "content": [
+            {"type": "text", "text": "and", "text_elements": []},
+            {"type": "image", "image_url": "data:image/png;base64,UE5H"},
+            {"type": "image", "url": "https://x/a.png"},
+            {"type": "localImage", "path": "/w/a.png"}]}}}),
+    );
+    assert_eq!(
+        completed_native(&done, "u9")["content"],
+        json!([
+            {"type": "text", "text": "and", "text_elements": []},
+            {"type": "image"},
+            {"type": "image", "url": "https://x/a.png"},
+            {"type": "localImage", "path": "/w/a.png"},
+        ])
+    );
+    assert!(!format!("{events:?}{done:?}").contains("UE5H"));
+}
+
+/// The `native` of item `id`'s completion.
+fn completed_native<'a>(events: &'a [Event], id: &str) -> &'a serde_json::Value {
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::ItemCompleted { id: i, native, .. } if i == id => Some(native),
+            _ => None,
+        })
+        .unwrap()
 }
 
 /// The `native` of item `id`'s start.
@@ -1121,4 +1218,29 @@ fn collab_spawn_is_a_subagent_and_child_thread_items_belong_to_it() {
     assert_eq!(prompt.as_deref(), Some("Count the lines in README.txt"));
     assert_eq!(model.as_deref(), Some("gpt-6.1-sol"));
     assert_eq!(t.children("call_spawn").count(), 1);
+}
+
+#[test]
+fn restored_transcripts_keep_history_image_refs() {
+    let mut d = CodexDriver::new(CodexConfig {
+        resume: Some("t".into()),
+        ..CodexConfig::default()
+    });
+    d.handshake();
+    let events = feed(
+        &mut d,
+        json!({"id": 2, "result": {"model": "gpt-6.1-sol", "thread": {"id": "t", "turns": [{"id": "u", "status": "completed", "items": [
+        {"type": "userMessage", "id": "i1", "content": [{"type": "image", "url": "data:image/png;base64,UE5H"}]}]}]}}}),
+    );
+    // The completion repeats the item without the refs; the transcript
+    // keeps them, through a snapshot too.
+    let mut t = crate::transcript::Transcript::new();
+    for e in &events {
+        t.apply(e);
+    }
+    let t: crate::transcript::Transcript = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+    assert_eq!(
+        t.get("i1").unwrap().images,
+        [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
+    );
 }

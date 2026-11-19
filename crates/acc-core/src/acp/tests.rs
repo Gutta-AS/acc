@@ -96,6 +96,64 @@ fn copilot_session(session: &str) -> Value {
 }
 
 /// Runs `initialize` and `session/new` for a Copilot-like agent.
+fn antigravity_session(session: &str, mode: &str) -> Value {
+    json!({
+        "sessionId": session,
+        "configOptions": [
+            { "id": "mode", "name": "Mode", "category": "mode", "type": "select",
+              "currentValue": mode,
+              "options": [ { "value": "default", "name": "Default" },
+                           { "value": "accept-edits", "name": "Accept edits" },
+                           { "value": "auto", "name": "Auto" } ] }
+        ]
+    })
+}
+
+fn open_antigravity(permission: Option<&str>, opened_in: &str) -> (AcpDriver, Vec<Value>) {
+    let mut cfg = AcpConfig::new("/home/v/proj", Start::New);
+    cfg.permission = permission.map(str::to_owned);
+    let mut d = AcpDriver::new(Harness::Antigravity, cfg);
+    let init = one(&d.handshake());
+    feed(&mut d, &[result(init["id"].clone(), init_result(json!({})))]);
+    let new = one(&d.poll_transmit());
+    feed(
+        &mut d,
+        &[result(new["id"].clone(), antigravity_session("s1", opened_in))],
+    );
+    let out = sent(&d.poll_transmit());
+    (d, out)
+}
+
+#[test]
+fn antigravity_starts_in_default_mode_unless_asked() {
+    // agy 1.5.7 opens in Auto; with no permission configured acc sets `default`.
+    let (_, out) = open_antigravity(None, "auto");
+    assert_eq!(out.len(), 1);
+    assert_eq!(out[0]["method"], "session/set_config_option");
+    assert_eq!(
+        out[0]["params"],
+        json!({ "sessionId": "s1", "configId": "mode", "value": "default" })
+    );
+
+    // Already in the wanted mode: nothing to send.
+    assert!(open_antigravity(None, "default").1.is_empty());
+
+    // Configured permissions map onto agy's modes.
+    for (given, mode) in [
+        ("auto", "auto"),
+        ("yolo", "auto"),
+        ("accept-edits", "accept-edits"),
+        ("ask", "default"),
+    ] {
+        let (_, out) = open_antigravity(Some(given), "default");
+        let want = if mode == "default" { 0 } else { 1 };
+        assert_eq!(out.len(), want, "{given}");
+        if want == 1 {
+            assert_eq!(out[0]["params"]["value"], mode, "{given}");
+        }
+    }
+}
+
 fn ready_copilot() -> AcpDriver {
     let mut d = driver(Harness::Copilot, Start::New);
     let init = one(&d.handshake());

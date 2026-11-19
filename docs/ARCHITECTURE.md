@@ -91,8 +91,9 @@ resize first. Transcripts show a prompt's text, or `[image]` when it had none. T
 come back in events: a user message with images carries ACC's `image::ImageRef`s in its
 `ItemStarted` `native` as `{"images": [...]}` (media type, decoded size and SHA-256 when the bytes
 were inline, the host path for Codex's `localImage`; Codex keeps its own item JSON and gains the
-`images` key), so the client that sent the prompt matches its attachments by `sha256`. Messages
-without images are unchanged.
+`images` key), so the client that sent the prompt matches its attachments by `sha256`. The
+transcript's `Item` keeps them as `images` too (left out of the JSON when empty), so a restored
+session still has them. Messages without images are unchanged.
 
 ### ACP driver (Cursor, Copilot, opencode, Antigravity)
 
@@ -145,8 +146,10 @@ both ends are known. The detail is the same shape on every harness:
 
 The feed also settles what each harness says in its own words: the parent of a subagent's items,
 whether an item failed, and message text a harness sends only with the completion. The native JSON
-still rides along as `native`, for debugging and harness-specific UI. Anything else that reads a
-harness's items (a transcript file, say) uses the same feed.
+still rides along as `native`, for debugging and harness-specific UI, minus what would bloat every
+event: a Codex `userMessage` loses its images' base64 data URLs (`url`, `image_url`), which its
+`images` refs stand for. Anything else that reads a harness's items (a transcript file, say) uses
+the same feed.
 
 Beside items, the main conversation's to-do list arrives whole as `Event::Plan` (Codex's
 `turn/plan/updated`, ACP's `plan` update, Claude's `TodoWrite` call, which stays a tool item too),
@@ -381,6 +384,13 @@ Codex `config` overrides (one `mcp_servers.<name>` key each, so the user's serve
 pi has no MCP, so launching pi with servers is refused, and a handoff to pi leaves them out. Names are 1-64 of
 `A-Z a-z 0-9 _ -`. They are kept in `spec.json` and carried over by revive, fork, restart and handoff; without
 any, nothing in the launch changes.
+
+**Spend cap.** `LaunchRequest::spend_cap` (`{amount, unit}`) caps one session's spend with the harness's own
+launch flag: Claude `--max-budget-usd` (unit `usd`) and Copilot `--max-ai-credits` (unit `credits`, the harness's
+own credits, kept apart from dollars as `Usage::other_cost` does). A cap in a unit the harness doesn't count in,
+and any other harness, is refused with `Unsupported`; an amount that isn't above zero is `InvalidSpendCap`.
+The harness enforces it (Copilot counts earlier credits on resume and in subagents). It is kept in `spec.json`
+and carried over by revive, fork and restart; a handoff leaves it behind unless the new harness counts in the same unit (none does today).
 
 **Worktrees.** Several agents can work on one repository at once, each in a git worktree of its
 own. `worktree::add_script(cwd, name, base)` (`worktree_add_exec` in the bindings; use the session
