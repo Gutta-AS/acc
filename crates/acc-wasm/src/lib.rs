@@ -184,6 +184,19 @@ export interface Item {
   started_at_ms?: number;
   /** When the harness says the item finished, ms since the Unix epoch. */
   completed_at_ms?: number;
+  /** ACC's refs to the images a user message carried (absent without images). */
+  images?: ImageRef[];
+}
+
+/** An image a user message carried, without its bytes. */
+export interface ImageRef {
+  media_type?: string;
+  /** Decoded size, when the bytes were inline. */
+  bytes?: number;
+  /** Lowercase hex SHA-256 of the decoded bytes, when they were inline. */
+  sha256?: string;
+  /** The file on the host, when the harness took the image by path. */
+  path?: string;
 }
 
 export interface Usage {
