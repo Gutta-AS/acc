@@ -1786,6 +1786,14 @@ fn normalize_permission(harness: Harness, raw: &str) -> String {
                 "default".into()
             }
         }
+        // agy's session modes; anything unrecognised stays on `default`
+        // (ask first) rather than falling through to the agent's own
+        // default, which is Auto since 1.5.7.
+        Harness::Antigravity => match p.as_str() {
+            "auto" | "yolo" | "allow_all" | "allow-all" | "bypass" | "unrestricted" => "auto".into(),
+            "accept-edits" | "accept_edits" | "acceptedits" | "edits" => "accept-edits".into(),
+            _ => "default".into(),
+        },
         _ => raw.to_owned(),
     }
 }
@@ -2079,6 +2087,9 @@ impl AcpDriver {
 
     /// Copilot's `allow_all` is a live config option; honour launch permission.
     fn apply_startup_permission(&mut self) -> Vec<u8> {
+        if self.harness == Harness::Antigravity {
+            return self.apply_antigravity_mode();
+        }
         if self.harness != Harness::Copilot {
             return Vec::new();
         }
@@ -2102,6 +2113,25 @@ impl AcpDriver {
         }
         self.set_option(OptionId::Permission, value.into())
             .unwrap_or_default()
+    }
+
+    /// agy defaults new sessions to Auto (1.5.7), which edits files and runs
+    /// sandboxed commands without a permission request. Start in the mode
+    /// the caller asked for, or `default` when none, so acc's permission
+    /// policy sees every request.
+    fn apply_antigravity_mode(&mut self) -> Vec<u8> {
+        let want = self
+            .cfg
+            .permission
+            .as_deref()
+            .map_or_else(|| "default".to_owned(), |p| normalize_permission(self.harness, p));
+        let Some(def) = self.opts.defs.iter().find(|d| d.id == OptionId::Mode) else {
+            return Vec::new();
+        };
+        if def.current.as_deref() == Some(want.as_str()) || !def.values.contains(&want) {
+            return Vec::new();
+        }
+        self.set_option(OptionId::Mode, want).unwrap_or_default()
     }
 
     fn set_option(&mut self, id: OptionId, value: String) -> Result<Vec<u8>, DriverError> {
