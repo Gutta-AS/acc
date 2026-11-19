@@ -663,6 +663,34 @@ fn resumed_history_is_replayed_as_items() {
         id: "i2".into(),
         text: "Fixed.".into()
     }));
+    // Without images the item rides along untouched.
+    assert_eq!(
+        completed_native(&events, "i1"),
+        &json!({"type": "userMessage", "id": "i1", "content": [{"type": "text", "text": "fix it", "text_elements": []}]})
+    );
+}
+
+#[test]
+fn resumed_history_images_are_refs_without_data_urls() {
+    let mut d = CodexDriver::new(CodexConfig {
+        resume: Some("t".into()),
+        ..CodexConfig::default()
+    });
+    d.handshake();
+    let events = feed(
+        &mut d,
+        json!({"id": 2, "result": {"model": "gpt-6.1-sol", "thread": {"id": "t", "turns": [{"id": "u", "status": "completed", "items": [
+        {"type": "userMessage", "id": "i1", "content": [{"type": "image", "url": "data:image/png;base64,UE5H"}]}]}]}}}),
+    );
+    assert_eq!(
+        crate::image::refs_of(started_native(&events, "i1")),
+        [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
+    );
+    assert_eq!(
+        completed_native(&events, "i1")["content"],
+        json!([{"type": "image"}])
+    );
+    assert!(!format!("{events:?}").contains("UE5H"));
 }
 
 #[test]
@@ -936,6 +964,41 @@ fn prompts_with_images_are_data_url_inputs() {
         [crate::image::ImageRef::of_bytes(Some("image/png"), b"PNG")]
     );
     assert_eq!(started_native(&events, "u9")["type"], "userMessage");
+    // The bytes don't ride along: the data URL is gone, the block stays.
+    assert_eq!(
+        started_native(&events, "u9")["content"],
+        json!([{"type": "image"}])
+    );
+    let done = feed(
+        &mut d,
+        json!({"method": "item/completed", "params": {"threadId": THREAD, "turnId": "t1",
+        "item": {"type": "userMessage", "id": "u9", "content": [
+            {"type": "text", "text": "and", "text_elements": []},
+            {"type": "image", "image_url": "data:image/png;base64,UE5H"},
+            {"type": "image", "url": "https://x/a.png"},
+            {"type": "localImage", "path": "/w/a.png"}]}}}),
+    );
+    assert_eq!(
+        completed_native(&done, "u9")["content"],
+        json!([
+            {"type": "text", "text": "and", "text_elements": []},
+            {"type": "image"},
+            {"type": "image", "url": "https://x/a.png"},
+            {"type": "localImage", "path": "/w/a.png"},
+        ])
+    );
+    assert!(!format!("{events:?}{done:?}").contains("UE5H"));
+}
+
+/// The `native` of item `id`'s completion.
+fn completed_native<'a>(events: &'a [Event], id: &str) -> &'a serde_json::Value {
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::ItemCompleted { id: i, native, .. } if i == id => Some(native),
+            _ => None,
+        })
+        .unwrap()
 }
 
 /// The `native` of item `id`'s start.

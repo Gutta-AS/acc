@@ -143,8 +143,10 @@ both ends are known. The detail is the same shape on every harness:
 
 The feed also settles what each harness says in its own words: the parent of a subagent's items,
 whether an item failed, and message text a harness sends only with the completion. The native JSON
-still rides along as `native`, for debugging and harness-specific UI. Anything else that reads a
-harness's items (a transcript file, say) uses the same feed.
+still rides along as `native`, for debugging and harness-specific UI, minus what would bloat every
+event: a Codex `userMessage` loses its images' base64 data URLs (`url`, `image_url`), which its
+`images` refs stand for. Anything else that reads a harness's items (a transcript file, say) uses
+the same feed.
 
 Beside items, the main conversation's to-do list arrives whole as `Event::Plan` (Codex's
 `turn/plan/updated`, ACP's `plan` update, Claude's `TodoWrite` call, which stays a tool item too),

@@ -512,6 +512,7 @@ impl CodexDriver {
                 {
                     let mut ext = self.item_ext(item, &p);
                     add_image_refs(item, &mut ext);
+                    drop_image_data(&mut ext);
                     self.adopt_children(item);
                     let parent = self.parent_for(&p);
                     if let (Some(id), Some(kind)) = (owned(item, "id"), item_kind(item)) {
@@ -537,7 +538,9 @@ impl CodexDriver {
                         // The spawn call returned; the subagent runs on.
                         self.items.update(id, item.clone(), out);
                     } else {
-                        self.items.complete(id, item.clone(), out);
+                        let mut native = item.clone();
+                        drop_image_data(&mut native);
+                        self.items.complete(id, native, out);
                     }
                 }
             }
@@ -795,7 +798,9 @@ impl CodexDriver {
         if let Some(text) = initial_text(item).or_else(|| final_text(item)) {
             self.items.delta(id.clone(), text, out);
         }
-        self.items.complete(id, item.clone(), out);
+        let mut native = item.clone();
+        drop_image_data(&mut native);
+        self.items.complete(id, native, out);
     }
 
     // ---- server requests ---------------------------------------------------
@@ -1619,6 +1624,27 @@ fn add_image_refs(item: &Value, native: &mut Value) {
         match native {
             Value::Object(n) => n.extend(images),
             other => *other = Value::Object(images),
+        }
+    }
+}
+
+/// Leaves the base64 data URLs out of a user message's native JSON: each
+/// inline image block loses its `url` (`image_url`) and keeps the rest, so
+/// events don't carry the bytes [`add_image_refs`] already refers to.
+/// Remote URLs, `localImage` paths and other items stay as they are.
+fn drop_image_data(native: &mut Value) {
+    if str_at(native, "type") != Some("userMessage") {
+        return;
+    }
+    let Some(blocks) = native.get_mut("content").and_then(Value::as_array_mut) else {
+        return;
+    };
+    for block in blocks.iter_mut().filter(|b| str_at(b, "type") == Some("image")) {
+        if let Value::Object(b) = block {
+            b.retain(|k, v| {
+                !(matches!(k.as_str(), "url" | "image_url")
+                    && v.as_str().is_some_and(|u| u.starts_with("data:")))
+            });
         }
     }
 }
