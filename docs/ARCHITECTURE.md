@@ -380,6 +380,13 @@ pi has no MCP, so launching pi with servers is refused, and a handoff to pi leav
 `A-Z a-z 0-9 _ -`. They are kept in `spec.json` and carried over by revive, fork, restart and handoff; without
 any, nothing in the launch changes.
 
+**Spend cap.** `LaunchRequest::spend_cap` (`{amount, unit}`) caps one session's spend with the harness's own
+launch flag: Claude `--max-budget-usd` (unit `usd`) and Copilot `--max-ai-credits` (unit `credits`, the harness's
+own credits, kept apart from dollars as `Usage::other_cost` does). A cap in a unit the harness doesn't count in,
+and any other harness, is refused with `Unsupported`; an amount that isn't above zero is `InvalidSpendCap`.
+The harness enforces it (Copilot counts earlier credits on resume and in subagents). It is kept in `spec.json`
+and carried over by revive, fork and restart; a handoff leaves it behind unless the new harness counts in the same unit (none does today).
+
 **Worktrees.** Several agents can work on one repository at once, each in a git worktree of its
 own. `worktree::add_script(cwd, name, base)` (`worktree_add_exec` in the bindings; use the session
 id as the name) makes `~/.acc/w/<name>` on branch `acc/<name>` from `base` (default `HEAD`) and

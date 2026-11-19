@@ -56,7 +56,7 @@ pub const SNAPSHOT_VERSION: u32 = 3;
 const STALE_MS: u64 = 30_000;
 
 /// What to start. Omitted fields take their defaults.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct LaunchRequest {
     pub harness: Option<Harness>,
@@ -126,6 +126,44 @@ pub struct LaunchRequest {
     /// over to relaunches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<SessionMcpServer>,
+    /// Spend cap for this session, passed to the harness as its own launch
+    /// flag: Claude `--max-budget-usd` (USD), Copilot `--max-ai-credits`
+    /// (credits). A cap in a unit the harness doesn't count in, and every
+    /// other harness, can't launch. Kept in `spec.json` and carried over to
+    /// relaunches; a handoff keeps it only if the new harness counts in the
+    /// same unit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_cap: Option<SpendCap>,
+}
+
+/// A session's spend cap (see [`LaunchRequest::spend_cap`]).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct SpendCap {
+    /// Greater than zero.
+    pub amount: f64,
+    pub unit: SpendUnit,
+}
+
+/// What a [`SpendCap`] counts in, as [`crate::event::Usage::other_cost`]
+/// keeps dollars and a harness's own credits apart.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SpendUnit {
+    Usd,
+    /// The harness's own credits (Copilot AI credits).
+    Credits,
+}
+
+impl SpendCap {
+    /// The harness's launch flag for this cap, `None` when it can't take a
+    /// cap in this unit.
+    fn flag(&self, harness: Harness) -> Option<String> {
+        match (harness, self.unit) {
+            (Harness::Claude, SpendUnit::Usd) => Some(format!("--max-budget-usd={}", self.amount)),
+            (Harness::Copilot, SpendUnit::Credits) => Some(format!("--max-ai-credits={}", self.amount)),
+            _ => None,
+        }
+    }
 }
 
 /// A stdio MCP server for one session (see [`LaunchRequest::mcp_servers`]).
@@ -175,7 +213,7 @@ fn claude_mcp_config(servers: &[SessionMcpServer]) -> String {
 }
 
 /// Everything another client needs to attach; stored as `spec.json`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SessionSpec {
     pub v: u32,
     pub id: String,
@@ -219,6 +257,9 @@ pub struct SessionSpec {
     /// See [`LaunchRequest::mcp_servers`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<SessionMcpServer>,
+    /// See [`LaunchRequest::spend_cap`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub spend_cap: Option<SpendCap>,
 }
 
 impl SessionSpec {
@@ -247,6 +288,7 @@ impl SessionSpec {
             deny_instead_of_prompting: false,
             system_prompt: None,
             mcp_servers: Vec::new(),
+            spend_cap: None,
         }
     }
 
@@ -286,7 +328,7 @@ pub struct Update {
 /// What to do for a command.
 // Built once per action; boxing a launch request isn't worth the churn.
 #[allow(clippy::large_enum_variant)]
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", content = "value", rename_all = "snake_case")]
 pub enum Outbound {
     /// Write these bytes through [`Session::input_exec`] (may be empty).
@@ -308,6 +350,8 @@ pub enum SessionError {
     InvalidWorktree(String),
     #[error("the session has no worktree")]
     NoWorktree,
+    #[error("invalid spend cap: the amount must be a number above zero")]
+    InvalidSpendCap,
     #[error("invalid MCP server {0:?}: a name of 1-64 of A-Z a-z 0-9 _ - and a command")]
     InvalidMcpServer(String),
     /// [`Session::revive`] needs the harness's own session id, and this
@@ -499,6 +543,17 @@ impl Session {
                 what: "MCP servers (pi has no MCP)",
             }));
         }
+        if let Some(cap) = &req.spend_cap {
+            if !(cap.amount.is_finite() && cap.amount > 0.0) {
+                return Err(SessionError::InvalidSpendCap);
+            }
+            if cap.flag(harness).is_none() {
+                return Err(SessionError::Driver(DriverError::Unsupported {
+                    harness,
+                    what: "a spend cap in this unit (Claude counts USD, Copilot AI credits, the rest have none)",
+                }));
+            }
+        }
         let mut spec = SessionSpec {
             v: SPEC_VERSION,
             id: id.to_owned(),
@@ -527,6 +582,7 @@ impl Session {
             deny_instead_of_prompting: req.deny_instead_of_prompting,
             system_prompt: req.system_prompt.clone().filter(|p| !p.trim().is_empty()),
             mcp_servers: req.mcp_servers.clone(),
+            spend_cap: req.spend_cap,
         };
         let mut driver = driver_for(&spec, false, client_tag);
         spec.launch = match harness {
@@ -548,6 +604,9 @@ impl Session {
         }
         if harness == Harness::Claude && !spec.mcp_servers.is_empty() {
             spec.launch.args.push(claude_mcp_config(&spec.mcp_servers));
+        }
+        if let Some(flag) = spec.spend_cap.and_then(|c| c.flag(harness)) {
+            spec.launch.args.push(flag);
         }
         if let Some(launcher) = &spec.launcher {
             spec.launch = launcher.wrap(spec.launch);
@@ -639,6 +698,7 @@ impl Session {
             deny_instead_of_prompting: spec.deny_instead_of_prompting,
             system_prompt: spec.system_prompt.clone(),
             mcp_servers: spec.mcp_servers.clone(),
+            spend_cap: spec.spend_cap,
         };
         // The same session: snapshots taken before still match it.
         Self::launch(req, &spec.id, client_tag, spec.created_ms)
@@ -1038,6 +1098,7 @@ impl Session {
             deny_instead_of_prompting: self.spec.deny_instead_of_prompting,
             system_prompt: self.spec.system_prompt.clone(),
             mcp_servers: self.spec.mcp_servers.clone(),
+            spend_cap: self.spec.spend_cap,
         }
     }
 
@@ -1076,6 +1137,8 @@ impl Session {
             } else {
                 self.spec.mcp_servers.clone()
             },
+            // Unless the new harness doesn't count in that unit.
+            spend_cap: self.spec.spend_cap.filter(|c| c.flag(to).is_some()),
             ..LaunchRequest::default()
         })
     }
@@ -1625,6 +1688,48 @@ mod tests {
         let (s, _) = Session::launch(req(Harness::Claude), "mcp3", "t", 0).unwrap();
         assert!(!s.spec().launch.args.iter().any(|a| a.starts_with("--mcp-config")));
         assert!(!s.spec().to_json().contains("mcp_servers"));
+    }
+
+    #[test]
+    fn spend_cap_becomes_the_harness_flag_in_its_own_unit() {
+        let cap = |amount, unit| Some(SpendCap { amount, unit });
+        let with = |h: Harness, c| {
+            let mut r = req(h);
+            r.spend_cap = c;
+            Session::launch(r, "cap1", "t", 0)
+        };
+        let (s, _) = with(Harness::Claude, cap(2.5, SpendUnit::Usd)).unwrap();
+        assert!(s.spec().launch.args.contains(&"--max-budget-usd=2.5".to_owned()));
+        assert_eq!(s.relaunch(false, None).spend_cap, cap(2.5, SpendUnit::Usd));
+        let (s, _) = with(Harness::Copilot, cap(100.0, SpendUnit::Credits)).unwrap();
+        assert!(s.spec().launch.args.contains(&"--max-ai-credits=100".to_owned()));
+        let spec = SessionSpec::from_json(&s.spec().to_json()).unwrap();
+        assert_eq!(spec.spend_cap, cap(100.0, SpendUnit::Credits));
+        // No other harness counts in Copilot's credits: a handoff leaves it behind.
+        assert_eq!(s.handoff(Harness::Claude, None).unwrap().spend_cap, None);
+
+        // Wrong unit, or a harness without a cap, doesn't launch.
+        for (h, c) in [
+            (Harness::Claude, cap(1.0, SpendUnit::Credits)),
+            (Harness::Copilot, cap(1.0, SpendUnit::Usd)),
+            (Harness::Codex, cap(1.0, SpendUnit::Usd)),
+            (Harness::Pi, cap(1.0, SpendUnit::Usd)),
+        ] {
+            assert!(matches!(
+                with(h, c),
+                Err(SessionError::Driver(DriverError::Unsupported { .. }))
+            ));
+        }
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(
+                with(Harness::Claude, cap(bad, SpendUnit::Usd)),
+                Err(SessionError::InvalidSpendCap)
+            ));
+        }
+        // Without a cap nothing changes.
+        let (s, _) = with(Harness::Claude, None).unwrap();
+        assert!(!s.spec().launch.args.iter().any(|a| a.starts_with("--max-")));
+        assert!(!s.spec().to_json().contains("spend_cap"));
     }
 
     #[test]
