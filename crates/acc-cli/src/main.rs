@@ -19,7 +19,7 @@ usage:
   acc doctor                            installed harnesses, and whether sessions can be sandboxed
   acc run <harness> [cwd] [--resume ID] [--model M] [--program PATH] [--json]
                                         drive a harness headlessly (claude, codex, pi, cursor,
-                                        copilot, opencode); type prompts or :help on stdin
+                                        copilot, opencode, agy); type prompts or :help on stdin
       [--sandbox [workspace|read-only]] [--sandbox-write PATH]... [--sandbox-hide PATH]...
       [--sandbox-show-credentials]
                                         confine it (Seatbelt on macOS, bubblewrap on Linux): write
