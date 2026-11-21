@@ -2131,6 +2131,56 @@ fn a_steer_that_missed_the_turn_is_sent_as_a_prompt() {
     let resent = one(&d.poll_transmit());
     assert_eq!(resent["method"], "session/prompt");
     assert_eq!(resent["params"]["prompt"][0]["text"], "late");
+    // Shown once, when it was steered; the resend doesn't show it again.
+    assert_eq!(
+        prompts(&d.take_events()),
+        [
+            ("prompt-1".to_owned(), "go".to_owned()),
+            ("prompt-2".to_owned(), "late".to_owned())
+        ]
+    );
+    // Its turn is an echoed one: the agent's replay of the prompt isn't
+    // shown either, and the next prompt is a normal one.
+    let events = feed(
+        &mut d,
+        &[
+            update(
+                "s1",
+                json!({ "sessionUpdate": "user_message_chunk", "content": { "type": "text", "text": "late" } }),
+            ),
+            result(resent["id"].clone(), json!({ "stopReason": "end_turn" })),
+        ],
+    );
+    assert!(prompts(&events).is_empty(), "{events:?}");
+    assert!(events.contains(&Event::TurnCompleted));
+    let next = one(&d.command(Command::prompt("thanks")).expect("prompt"));
+    assert_eq!(next["method"], "session/prompt");
+}
+
+#[test]
+fn a_missed_steer_steers_a_turn_that_began_meanwhile() {
+    let mut d = ready_steerable(json!({ "steering": { "supported": true } }));
+    let go = one(&d.command(Command::prompt("go")).expect("prompt"));
+    let steer = one(&d.command(Command::prompt("late")).expect("steer"));
+    feed(
+        &mut d,
+        &[result(go["id"].clone(), json!({ "stopReason": "end_turn" }))],
+    );
+    // Another prompt starts the next turn before the steer's answer comes.
+    let again = one(&d.command(Command::prompt("again")).expect("prompt"));
+    assert_eq!(again["method"], "session/prompt");
+    d.take_events();
+    feed(
+        &mut d,
+        &[result(
+            steer["id"].clone(),
+            json!({ "outcome": "promptRequired", "reason": "noRunningTurn" }),
+        )],
+    );
+    let resent = one(&d.poll_transmit());
+    assert_eq!(resent["method"], "_session/steering");
+    assert_eq!(resent["params"]["prompt"][0]["text"], "late");
+    assert!(prompts(&d.take_events()).is_empty(), "shown once already");
 }
 
 #[test]

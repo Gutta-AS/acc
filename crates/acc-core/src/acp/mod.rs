@@ -633,10 +633,26 @@ impl AcpDriver {
             }
             Pending::Steer { text, attachments } => {
                 // The turn ended before the agent could take the steer: it
-                // was shown as part of that turn, so send it as the next.
+                // was shown as part of that turn, so send it as the next
+                // without showing it again.
                 if r.get("outcome").and_then(Value::as_str) == Some("promptRequired") {
-                    self.history_next = self.history_next.saturating_sub(1);
-                    if let Ok(bytes) = self.try_prompt(text, attachments) {
+                    let bytes = if self.turn_running() {
+                        // Another prompt began a turn meanwhile: steer that one.
+                        self.require_session().map(|sid| {
+                            self.request(
+                                "_session/steering",
+                                json!({ "sessionId": sid, "prompt": prompt_blocks(&text, &attachments) }),
+                                Pending::Steer { text, attachments },
+                            )
+                        })
+                    } else {
+                        self.prompt(&text, &attachments).inspect(|_| {
+                            // What `echo_prompt` does, less the echo.
+                            self.echoed_turns += 1;
+                            self.turn_open = true;
+                        })
+                    };
+                    if let Ok(bytes) = bytes {
                         self.outgoing.extend(bytes);
                     }
                 }
