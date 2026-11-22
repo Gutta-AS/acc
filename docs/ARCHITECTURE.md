@@ -265,10 +265,15 @@ does; `write_script` delivers a write whole and at most once per id; `input_scri
 `write_script` exit `EXIT_NOT_RUNNING` once the harness is gone.
 
 **After a reboot.** The session folder outlasts a reboot, but the harness and its wrapper die without
-writing `exit`. `boot` holds the host's boot id (`/proc/sys/kernel/random/boot_id`, else
-`sysctl kern.boottime`) from when `pid` was written. A PID from another boot, or one whose exit was
-recorded, never counts as running, so status, stop, kill, input and write leave a process that reuses
-the PID alone. Such a session is `interrupted`. Nothing brings it back on its own: the embedder calls
+writing `exit`. `boot` holds the host's boot id (`/proc/sys/kernel/random/boot_id`, on macOS
+`sysctl kern.bootsessionuuid`, else `sysctl kern.boottime`) from when `pid` was written. A PID from
+another boot, or one whose exit was recorded, never counts as running, so status, stop, kill, input
+and write leave a process that reuses the PID alone. Such a session is `interrupted`. A marker that
+differs is not taken for a reboot on its own word: `kern.boottime` moves when the clock is adjusted,
+so markers written from it (by acc up to 0.5.0, and on the BSDs) stop matching while the harness runs
+on. When the marker differs, the process named in `pid` is asked instead: one whose stdin is the
+session's `in` is the harness, the session stays `alive`, and `boot` is rewritten. A process that
+only reuses the PID doesn't hold that pipe. Nothing brings it back on its own: the embedder calls
 `Session::revive(spec)` (core, `AccSession.revive` in ffi and wasm) or
 `acc_ssh::Session::revive(host, id)` (`revive_session` in ffi, `reviveSession` in node). Revive
 relaunches the same id from `spec.json` and resumes the harness's own session (`native_id`) with the

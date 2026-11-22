@@ -10,7 +10,8 @@
 //! Layout under `$HOME/.acc/s/<session>/`:
 //! `in` (FIFO), `out.ndjson`, `err`, `pid`, `boot` (the host's boot id when
 //! `pid` was written, so a PID from before a reboot is never mistaken for a
-//! live harness), `exit`, `spec.json` (one line, a
+//! live harness; a harness still reading `in` is live whatever it says),
+//! `exit`, `spec.json` (one line, a
 //! [`crate::session::SessionSpec`]), `sent` (ids of writes already
 //! delivered), `lock` (held while writing), and `events.ndjson`,
 //! `watch.pid` and `watch.tail` while a [`crate::watch`] follower runs.
@@ -341,13 +342,23 @@ impl SessionDir {
 const SANDBOX_LINE: &str =
     "[ -f \"$d/sandbox\" ] && printf 'B %s\\n' \"$(head -n 1 \"$d/sandbox\")\"; true\n";
 
-/// `acc_boot` prints the host's boot id (Linux, then macOS and the BSDs;
-/// nothing where neither exists). `acc_running` succeeds when `$d/pid`
-/// names a harness that runs now, leaving its PID in `$p`. Neither a PID
-/// whose exit was recorded nor one from before the host rebooted counts:
-/// it may belong to another process by now.
-pub(crate) const RUNNING: &str = r#"acc_boot() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.boottime 2>/dev/null || true; }
-acc_running() { [ ! -f "$d/exit" ] || return 1; p=$(cat "$d/pid" 2>/dev/null) && [ -n "$p" ] || return 1; b=$(cat "$d/boot" 2>/dev/null) || b=; [ -z "$b" ] || [ "$b" = "$(acc_boot)" ] || return 1; kill -0 "$p" 2>/dev/null; }
+/// `acc_boot` prints the host's boot id: Linux's `boot_id`, macOS's
+/// `kern.bootsessionuuid`, else `kern.boottime` (the BSDs; nothing where
+/// none exists). `acc_running` succeeds when `$d/pid` names a harness that
+/// runs now, leaving its PID in `$p`. A PID whose exit was recorded
+/// doesn't count, nor one from before the host rebooted: it may belong to
+/// another process by now.
+///
+/// A marker that differs from the host's boot id is not proof of a
+/// reboot. `kern.boottime` is a reading of the clock and moves when the
+/// clock is adjusted, and markers written from it (by acc up to 0.5.0, and
+/// still on the BSDs) stop matching while the harness runs on. So when
+/// the marker differs, `acc_holds` asks the process itself: one whose
+/// stdin is this session's `in` is the harness, and the marker is brought
+/// up to date. A process that merely reuses the PID never has that pipe.
+pub(crate) const RUNNING: &str = r#"acc_boot() { cat /proc/sys/kernel/random/boot_id 2>/dev/null || sysctl -n kern.bootsessionuuid 2>/dev/null || sysctl -n kern.boottime 2>/dev/null || true; }
+acc_holds() { if [ -e "/proc/$p/fd/0" ]; then acc_n=$(readlink "/proc/$p/fd/0" 2>/dev/null); else acc_n=$({ lsof -a -p "$p" -d 0 -Fn 2>/dev/null || /usr/sbin/lsof -a -p "$p" -d 0 -Fn 2>/dev/null; } | sed -n 's/^n//p' | head -n 1); fi; case "$acc_n" in */"${d##*/}"/in) return 0 ;; esac; return 1; }
+acc_running() { [ ! -f "$d/exit" ] || return 1; p=$(cat "$d/pid" 2>/dev/null) && [ -n "$p" ] || return 1; kill -0 "$p" 2>/dev/null || return 1; b=$(cat "$d/boot" 2>/dev/null) || b=; if [ -z "$b" ] || [ "$b" = "$(acc_boot)" ]; then return 0; fi; acc_holds || return 1; acc_boot >"$d/boot" 2>/dev/null; return 0; }
 "#;
 
 /// Takes the session's write lock, stealing it from a holder that died
@@ -1229,6 +1240,79 @@ mod sh_tests {
         ));
         assert_eq!(sh(&home, &dir.read_script(0), b""), "before\nafter\n");
         sh(&home, &dir.kill_script(1_000), b"");
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// macOS's `kern.boottime` is a clock reading that moves whenever the
+    /// clock is adjusted, so a marker made from it stops matching while
+    /// the harness runs on. The harness is still this session's: it reads
+    /// the session's pipe. It stays alive, can't be launched twice, and
+    /// can be stopped.
+    #[test]
+    fn a_running_harness_outlives_a_boot_marker_that_moved() {
+        let home = std::env::temp_dir().join(format!("acc-test-marker-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("mkdir");
+        let dir = SessionDir::new("mk").expect("valid id");
+        let d = home.join(ROOT).join("mk");
+        let spec = LaunchSpec {
+            program: "cat".into(),
+            args: vec![],
+            env: vec![],
+            protocol: Protocol::Acp,
+            sandbox: None,
+        };
+        sh(&home, &dir.launch_script(&spec, "~"), b"");
+        let pid = std::fs::read_to_string(d.join("pid")).expect("pid");
+        let moved = "{ sec = 1789839719, usec = 365018 } Sat Sep 19 19:41:59 2026\n";
+        std::fs::write(d.join("boot"), moved).expect("boot");
+
+        assert!(
+            matches!(
+                parse_status(&sh(&home, &dir.status_script(), b"")),
+                Some(Status::Alive { .. })
+            ),
+            "the harness still reads the session's pipe"
+        );
+        let healed = std::fs::read_to_string(d.join("boot")).expect("boot");
+        assert_ne!(healed, moved, "the marker is brought up to date");
+        assert!(matches!(
+            parse_list(&sh(&home, &list_script(), b""))[0].status,
+            Status::Alive { .. }
+        ));
+
+        // Not launched twice, even when the marker has moved again.
+        std::fs::write(d.join("boot"), moved).expect("boot");
+        let (_, code) = sh_code(&home, &dir.launch_script(&spec, "~"), b"");
+        assert_eq!(code, Some(EXIT_RUNNING as i32));
+        assert_eq!(std::fs::read_to_string(d.join("pid")).expect("pid"), pid);
+
+        // Input reaches it and it can be stopped.
+        std::fs::write(d.join("boot"), moved).expect("boot");
+        assert_eq!(sh_code(&home, &dir.input_script(), b"hi\n").1, Some(0));
+        std::fs::write(d.join("boot"), moved).expect("boot");
+        sh(&home, &dir.kill_script(1_000), b"");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !d.join("exit").exists() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert!(matches!(
+            parse_status(&sh(&home, &dir.status_script(), b"")),
+            Some(Status::Exited { .. })
+        ));
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    /// The marker is the host's boot id, not a reading of its clock.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_boot_marker_on_macos_is_the_boot_session_uuid() {
+        let home = std::env::temp_dir().join(format!("acc-test-bootid-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("mkdir");
+        let boot = sh(&home, &format!("{RUNNING}acc_boot"), b"");
+        let uuid = sh(&home, "sysctl -n kern.bootsessionuuid", b"");
+        assert!(!uuid.trim().is_empty());
+        assert_eq!(boot, uuid);
+        assert!(!boot.contains("sec ="), "{boot}");
         let _ = std::fs::remove_dir_all(&home);
     }
 
