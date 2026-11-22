@@ -632,6 +632,82 @@ mod tests {
     }
 
     #[test]
+    fn spend_cap_and_mcp_servers_cross_the_ffi_both_ways() {
+        let server = AccSessionMcpServer {
+            name: "acc_ui".into(),
+            command: "sh".into(),
+            args: vec!["/h/server.sh".into()],
+            env: HashMap::from([("ACC_UI_SESSION".into(), "s1".into())]),
+        };
+        let req = |spend_cap, mcp_servers| AccLaunchRequest {
+            sandbox: None,
+            deny_instead_of_prompting: false,
+            system_prompt: None,
+            mcp_servers,
+            spend_cap,
+            harness: AccHarness::Claude,
+            cwd: "/w".into(),
+            model: None,
+            permission: None,
+            agent: None,
+            resume: None,
+            fork: false,
+            title: None,
+            prompt: Some("hi".into()),
+            attachments: vec![],
+            parent: None,
+            replaces_parent: false,
+            labels: HashMap::new(),
+            launcher: None,
+            worktree: None,
+        };
+        let usd = |amount| {
+            Some(AccSpendCap {
+                amount,
+                unit: AccSpendUnit::Usd,
+            })
+        };
+        let id = new_session_id(AccHarness::Claude, vec![9; 15]);
+        let s = AccSession::launch(req(usd(2.5), vec![server.clone()]), id, "ph".into(), 1).unwrap();
+        let script = s.take_launch_exec().unwrap().script;
+        assert!(script.contains("--max-budget-usd=2.5"), "{script}");
+        assert!(script.contains("--mcp-config="), "{script}");
+
+        // Another client attaching gets both back in a relaunch.
+        let b = AccSession::attach(s.spec().json, "desk".into()).unwrap();
+        b.on_status(format!("alive 3 {}", HI.len()), 2);
+        b.feed(HI.to_vec(), 3);
+        let AccOutbound::Relaunch { request } = b.command(AccCommand::Fork).unwrap() else {
+            panic!("a fork relaunches");
+        };
+        assert_eq!(request.spend_cap, usd(2.5));
+        assert_eq!(request.mcp_servers, std::slice::from_ref(&server));
+
+        // Credits are Copilot's unit; a bad amount is an invalid session.
+        let credits = Some(AccSpendCap {
+            amount: 1.0,
+            unit: AccSpendUnit::Credits,
+        });
+        let id = new_session_id(AccHarness::Claude, vec![10; 15]);
+        assert!(matches!(
+            AccSession::launch(req(credits, vec![]), id.clone(), "ph".into(), 1),
+            Err(AccError::Unsupported { .. })
+        ));
+        assert!(matches!(
+            AccSession::launch(req(usd(0.0), vec![]), id.clone(), "ph".into(), 1),
+            Err(AccError::InvalidSession { .. })
+        ));
+        let bad = AccSessionMcpServer {
+            name: "has space".into(),
+            ..server
+        };
+        assert!(matches!(
+            AccSession::launch(req(None, vec![bad]), id, "ph".into(), 1),
+            Err(AccError::InvalidSession { .. })
+        ));
+    }
+
+    #[test]
     fn images_cross_as_bytes_and_oversized_ones_are_rejected() {
         let req = AccLaunchRequest {
             sandbox: None,

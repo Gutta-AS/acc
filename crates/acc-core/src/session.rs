@@ -1733,6 +1733,33 @@ mod tests {
     }
 
     #[test]
+    fn mcp_server_names_are_checked_at_their_bounds_and_need_a_command() {
+        let launch = |name: String, command: &str| {
+            let mut r = req(Harness::Claude);
+            r.mcp_servers = vec![SessionMcpServer {
+                name,
+                command: command.into(),
+                ..mcp_server()
+            }];
+            Session::launch(r, "mcp4", "t", 0)
+        };
+        assert!(launch("a".into(), "sh").is_ok());
+        assert!(launch("A-z_09".into(), "sh").is_ok());
+        assert!(launch("x".repeat(64), "sh").is_ok());
+        for (name, command) in [
+            ("x".repeat(65), "sh"),
+            ("é".into(), "sh"),
+            ("ok".into(), ""),
+            ("ok".into(), "  "),
+        ] {
+            assert!(
+                matches!(launch(name.clone(), command), Err(SessionError::InvalidMcpServer(n)) if n == name),
+                "{name:?} {command:?}"
+            );
+        }
+    }
+
+    #[test]
     fn acp_needs_absolute_cwd_and_codex_waits_for_thread_to_prompt() {
         let mut r = req(Harness::Opencode);
         r.cwd = "proj".into();
