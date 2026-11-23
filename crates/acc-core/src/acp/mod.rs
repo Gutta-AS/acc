@@ -6,11 +6,19 @@
 //! `session/resume`), sends `session/prompt` per turn and answers the agent's
 //! `session/request_permission` requests. Everything else arrives as
 //! `session/update` notifications. Targets protocol version 1, checked
-//! against the ACP schema 1.30, Cursor
+//! against the ACP schema 1.34, Cursor
 //! 2026.10.22, Copilot 1.0.105 and opencode 2.2.5. Besides the stable
 //! protocol it uses `configOptions`, session compaction, form elicitation
-//! (questions), `$/cancel_request`, and, when the agent offers them,
-//! `session/set_title`, `session/close` and the client system prompt.
+//! (questions), `$/cancel_request`, subagent sessions (`subagent_update`,
+//! `session_message`, `session` tool call content), and, when the agent
+//! offers them, `session/set_title`, `session/close` and the client system
+//! prompt.
+//!
+//! Subagents arrive two ways. Agents that follow the stable subagent
+//! sessions (schema 1.34) announce each child with `subagent_update` and
+//! send its updates under the child's own session id. opencode instead
+//! streams a child's updates under the parent's id, marked with
+//! `_meta["opencode/child-session"]`; that path stays as the fallback.
 //!
 //! Several clients can share one detached agent (desktop and phone on the
 //! same FIFO and log, see [`crate::detached`]). For that, request ids carry a
@@ -182,6 +190,34 @@ struct PermissionWait {
     form: Option<Value>,
 }
 
+/// A child session the agent announced with `subagent_update`.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ChildSession {
+    /// The session that owns it: the announcement's outer session id.
+    parent: String,
+    /// Its Subagent item: the subagent tool call it runs for, or one of its
+    /// own when no tool call was there to claim.
+    item: ItemId,
+    /// The item is its own, so it starts and completes with the child's
+    /// work state instead of with a tool call.
+    own_item: bool,
+    /// The own item is completed (the child went idle).
+    #[serde(default)]
+    idle: bool,
+    /// Every field reported so far, patched in order, plus the `prompt` and
+    /// `report` taken from session-directed messages. Items carry it as
+    /// `subagent` in their JSON.
+    record: Value,
+}
+
+/// A session-directed message, as far as it has been reported.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct SessionMessage {
+    sender: Option<String>,
+    recipient: Option<String>,
+    text: String,
+}
+
 /// Sans-IO ACP client for one agent process and one active session.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct AcpDriver {
@@ -254,6 +290,14 @@ pub struct AcpDriver {
     child_sessions: BTreeMap<String, String>,
     /// The message or thought streaming in each child session.
     child_open: BTreeMap<String, (ItemId, ItemKind)>,
+    /// Child sessions announced with `subagent_update` (schema 1.34), by
+    /// session id. Their updates carry their own session id.
+    #[serde(default)]
+    subagents: BTreeMap<String, ChildSession>,
+    /// Session-directed messages (`session_message`) by transcript session
+    /// id, then message id.
+    #[serde(default)]
+    session_messages: BTreeMap<String, BTreeMap<String, SessionMessage>>,
     item_seq: u64,
     /// Prompts this client sent, as items, until the session takes them:
     /// ACP agents only repeat a prompt when `session/load` replays history.
@@ -318,6 +362,8 @@ impl AcpDriver {
             subagent_tools: BTreeSet::new(),
             child_sessions: BTreeMap::new(),
             child_open: BTreeMap::new(),
+            subagents: BTreeMap::new(),
+            session_messages: BTreeMap::new(),
             item_seq: 0,
             echoes: Vec::new(),
             echo_seq: 0,
@@ -842,8 +888,9 @@ impl AcpDriver {
         out.push(Event::OptionsChanged);
         self.refresh_palette(out);
         self.set_state(RunState::Idle, None, out);
+        // In order, so a child's announcement precedes its own updates.
         for (sid, msg) in std::mem::take(&mut self.early) {
-            if self.session_id.as_deref() == Some(sid.as_str()) {
+            if self.session_id.as_deref() == Some(sid.as_str()) || self.subagents.contains_key(&sid) {
                 self.on_notification("session/update", &msg, out);
             }
         }
@@ -864,6 +911,8 @@ impl AcpDriver {
         self.subagent_tools.clear();
         self.child_sessions.clear();
         self.child_open.clear();
+        self.subagents.clear();
+        self.session_messages.clear();
         self.harness_commands.clear();
         self.rebuild_commands();
         self.history.clear();
@@ -1002,12 +1051,18 @@ impl AcpDriver {
         // An empty `rawInput` says nothing: Cursor starts tool calls while
         // the model is still writing their input.
         let tool = &without_empty_input(params.get("toolCall").unwrap_or(&Value::Null));
-        let tool_call_id = tool.get("toolCallId").and_then(Value::as_str).map(str::to_owned);
-        if let Some(tid) = &tool_call_id {
-            if self.open_tools.contains(tid) {
-                self.upgrade_to_subagent(tid, tool, None, out);
+        // A child session's request names the child's own tool call.
+        let sid = str_at(params, "sessionId");
+        let scoped = tool
+            .get("toolCallId")
+            .and_then(Value::as_str)
+            .map(|t| self.scoped_tool(sid, t));
+        let tool_call_id = scoped.as_ref().map(|(id, _)| id.clone());
+        if let Some((tid, child)) = scoped {
+            if self.open_tools.contains(&tid) {
+                self.upgrade_to_subagent(&tid, tool, child.map(|(c, _)| c), out);
             } else {
-                self.start_tool(tid.clone(), tool, None, out);
+                self.start_tool(tid, tool, child, out);
             }
         }
         let options: Vec<PermissionOption> = params
@@ -1046,7 +1101,7 @@ impl AcpDriver {
         let native = tool
             .get("rawInput")
             .or_else(|| {
-                let tid = tool.get("toolCallId").and_then(Value::as_str)?;
+                let tid = self.permissions.get(&request_id)?.tool_call_id.as_deref()?;
                 self.items.native(tid)?.get("rawInput")
             })
             .cloned()
@@ -1104,7 +1159,8 @@ impl AcpDriver {
             message
         };
         let request_id = id_key(&id);
-        let item_id = str_at(params, "toolCallId").map(str::to_owned);
+        let item_id =
+            str_at(params, "toolCallId").map(|t| self.scoped_tool(str_at(params, "sessionId"), t).0);
         self.permissions.insert(
             request_id.clone(),
             PermissionWait {
@@ -1151,6 +1207,13 @@ impl AcpDriver {
             return;
         }
         let sid = params.get("sessionId").and_then(Value::as_str);
+        // A child session the agent announced sends under its own id.
+        if let Some(child) = sid.filter(|s| self.subagents.contains_key(*s)) {
+            if let Some(update) = params.get("update") {
+                self.on_announced_child_update(child, update, out);
+            }
+            return;
+        }
         match (&self.session_id, sid) {
             (Some(cur), Some(sid)) if cur != sid => {
                 // Updates for a session being opened can beat its response.
@@ -1181,7 +1244,16 @@ impl AcpDriver {
             self.on_child_update(kind, child, update, out);
             return;
         }
+        let root = self
+            .session_id
+            .clone()
+            .or_else(|| sid.map(str::to_owned))
+            .unwrap_or_default();
         match kind {
+            "subagent_update" => self.on_subagent_update(&root, update, out),
+            "session_message" | "session_message_chunk" => {
+                self.on_session_message(&root, kind, update, out);
+            }
             "agent_message_chunk" => self.chunk(ItemKind::AgentMessage, update, out),
             "agent_thought_chunk" => self.chunk(ItemKind::Reasoning, update, out),
             "user_message_chunk" if self.echoed_turns > 0 && !self.replaying => {}
@@ -1431,7 +1503,16 @@ impl AcpDriver {
             (Some(s), Some(p)) => s == p,
             (Some(_), None) => false,
         };
-        let i = self.unclaimed_subagents.iter().position(|(_, s)| ours(s))?;
+        // A call that already names another child session isn't this one's.
+        let elsewhere = |tool: &str| {
+            self.items
+                .native(tool)
+                .is_some_and(|n| session_refs(n).iter().any(|s| s != child))
+        };
+        let i = self
+            .unclaimed_subagents
+            .iter()
+            .position(|(t, s)| ours(s) && !elsewhere(t))?;
         let (item, _) = self.unclaimed_subagents.remove(i);
         self.child_sessions.insert(child.to_owned(), item.clone());
         Some(item)
@@ -1450,6 +1531,30 @@ impl AcpDriver {
         if !self.replaying {
             self.working(out);
         }
+        self.child_update(&child, parent, false, kind, update, out);
+    }
+
+    /// One update of a child session's own conversation, shown under its
+    /// Subagent item `parent`. With `scoped`, the child's tool call and
+    /// message ids are its own (schema 1.34: unique within the session), so
+    /// their items are keyed `<child>/<id>`.
+    fn child_update(
+        &mut self,
+        child: &str,
+        parent: ItemId,
+        scoped: bool,
+        kind: &str,
+        update: &Value,
+        out: &mut Vec<Event>,
+    ) {
+        let child = child.to_owned();
+        let key = |id: &str| {
+            if scoped {
+                format!("{child}/{id}")
+            } else {
+                id.to_owned()
+            }
+        };
         match kind {
             "agent_message_chunk" | "agent_thought_chunk" | "user_message_chunk" => {
                 let item_kind = match kind {
@@ -1457,7 +1562,8 @@ impl AcpDriver {
                     "agent_thought_chunk" => ItemKind::Reasoning,
                     _ => ItemKind::UserMessage,
                 };
-                let message_id = update.get("messageId").and_then(Value::as_str);
+                let message_id = update.get("messageId").and_then(Value::as_str).map(key);
+                let message_id = message_id.as_deref();
                 let same = self
                     .child_open
                     .get(&child)
@@ -1487,10 +1593,12 @@ impl AcpDriver {
                 }
             }
             "tool_call" | "tool_call_update" => {
-                let Some(id) = update.get("toolCallId").and_then(Value::as_str) else {
+                let Some(id) = update.get("toolCallId").and_then(Value::as_str).map(key) else {
                     out.push(native(kind, update));
                     return;
                 };
+                let id = id.as_str();
+                self.resolve_permissions_for(id, out);
                 if self.open_tools.contains(id) {
                     self.upgrade_to_subagent(id, update, Some(child.clone()), out);
                     if !is_final(update) {
@@ -1499,10 +1607,236 @@ impl AcpDriver {
                 } else {
                     self.start_tool(id.to_owned(), update, Some((child, parent)), out);
                 }
+                self.note_session_refs(id, update);
                 self.finish_tool_if_done(id, update, out);
             }
             // Usage, plans and the rest of a child session are its own.
             _ => out.push(native(kind, update)),
+        }
+    }
+
+    /// An update a child session announced with `subagent_update` sends
+    /// under its own id: its conversation, its own children, and messages
+    /// between sessions.
+    fn on_announced_child_update(&mut self, child: &str, update: &Value, out: &mut Vec<Event>) {
+        let kind = update.get("sessionUpdate").and_then(Value::as_str).unwrap_or("");
+        match kind {
+            "subagent_update" => return self.on_subagent_update(child, update, out),
+            "session_message" | "session_message_chunk" => {
+                return self.on_session_message(child, kind, update, out);
+            }
+            _ => {}
+        }
+        let Some(item) = self.subagents.get(child).map(|c| c.item.clone()) else {
+            return;
+        };
+        self.child_activity(out);
+        self.child_update(child, item, true, kind, update, out);
+    }
+
+    /// A child's activity. A child can work on after the parent's turn
+    /// ended, reporting its own state on its Subagent item, so it marks the
+    /// parent working only during a turn; outside one it only clears a
+    /// permission it was blocked on once that was answered.
+    fn child_activity(&mut self, out: &mut Vec<Event>) {
+        if self.replaying {
+            return;
+        }
+        if self.turn_open {
+            self.working(out);
+        } else if matches!(self.state, Some((RunState::Blocked { .. }, _))) && self.permissions.is_empty() {
+            self.set_state(RunState::Idle, None, out);
+        }
+    }
+
+    /// `subagent_update` on session `owner`: announces the child it names,
+    /// or patches what is known about it (title, description, work state,
+    /// directories). A new child takes the oldest unclaimed subagent tool
+    /// call of its parent session as its item, or gets one of its own.
+    fn on_subagent_update(&mut self, owner: &str, update: &Value, out: &mut Vec<Event>) {
+        let Some(child) = str_at(update, "sessionId").map(str::to_owned) else {
+            out.push(native("subagent_update", update));
+            return;
+        };
+        if child == owner || self.session_id.as_deref() == Some(child.as_str()) {
+            out.push(native("subagent_update", update));
+            return;
+        }
+        let announced = !self.subagents.contains_key(&child);
+        if announced {
+            let (item, own_item) = match self.subagent_for(&child, Some(owner)) {
+                Some(item) => (item, false),
+                None => (format!("subagent:{child}"), true),
+            };
+            self.child_sessions.insert(child.clone(), item.clone());
+            self.subagents.insert(
+                child.clone(),
+                ChildSession {
+                    parent: owner.to_owned(),
+                    item,
+                    own_item,
+                    idle: false,
+                    record: json!({ "sessionId": child }),
+                },
+            );
+        }
+        let Some(sub) = self.subagents.get_mut(&child) else {
+            return;
+        };
+        // Every field but `sessionId` is a patch: `null` clears it.
+        if let (Value::Object(record), Some(fields)) = (&mut sub.record, update.as_object()) {
+            for (k, v) in fields {
+                match k.as_str() {
+                    "sessionUpdate" | "sessionId" | "_meta" => {}
+                    _ if v.is_null() => {
+                        record.remove(k);
+                    }
+                    _ => {
+                        record.insert(k.clone(), v.clone());
+                    }
+                }
+            }
+        }
+        self.show_subagent(&child, announced, out);
+    }
+
+    /// Reports a child's record on its Subagent item. An item of its own
+    /// follows the child's work state: it completes when the child goes
+    /// idle and starts again when it gets more work. A subagent tool call
+    /// keeps its own lifecycle and only takes the record.
+    fn show_subagent(&mut self, child: &str, announced: bool, out: &mut Vec<Event>) {
+        let Some(sub) = self.subagents.get(child) else {
+            return;
+        };
+        let (item, own_item, was_idle) = (sub.item.clone(), sub.own_item, sub.idle);
+        let state = sub
+            .record
+            .pointer("/state/state")
+            .and_then(Value::as_str)
+            .map(str::to_owned);
+        let stop = sub.record.pointer("/state/stopReason").and_then(Value::as_str);
+        let mut native = json!({ "subagent": sub.record });
+        if stop == Some("error") {
+            native["status"] = json!("error");
+        }
+        let parent = self.child_sessions.get(&sub.parent).cloned();
+        if !own_item {
+            self.items.update(item, native, out);
+            return;
+        }
+        let idle = match state.as_deref() {
+            Some("idle") => true,
+            Some("running" | "requires_action") => false,
+            _ => was_idle,
+        };
+        if announced || (was_idle && !idle) {
+            self.items
+                .start(item.clone(), ItemKind::Subagent, parent, native.clone(), out);
+            if idle {
+                self.items.complete(item, native, out);
+            }
+        } else if idle && !was_idle {
+            self.close_child_item(child, out);
+            self.items.complete(item, native, out);
+        } else {
+            self.items.update(item, native, out);
+        }
+        if let Some(sub) = self.subagents.get_mut(child) {
+            sub.idle = idle;
+        }
+    }
+
+    /// `session_message` / `session_message_chunk` in the transcript of
+    /// session `transcript`: a message between sessions. One from a parent
+    /// to its child becomes the child's `prompt`, one back from the child
+    /// its `report`, both on the child's Subagent item. Others, and ones
+    /// whose participants aren't known yet, stay native.
+    fn on_session_message(&mut self, transcript: &str, kind: &str, update: &Value, out: &mut Vec<Event>) {
+        let Some(message_id) = str_at(update, "messageId") else {
+            out.push(native(kind, update));
+            return;
+        };
+        let msg = self
+            .session_messages
+            .entry(transcript.to_owned())
+            .or_default()
+            .entry(message_id.to_owned())
+            .or_default();
+        if kind == "session_message" {
+            // Omitted leaves a field as it was; `null` clears it.
+            for (key, slot) in [
+                ("senderSessionId", &mut msg.sender),
+                ("recipientSessionId", &mut msg.recipient),
+            ] {
+                if let Some(v) = update.get(key) {
+                    *slot = v.as_str().map(str::to_owned);
+                }
+            }
+            match update.get("content") {
+                None => {}
+                Some(Value::Array(blocks)) => msg.text = blocks.iter().filter_map(block_text).collect(),
+                Some(_) => msg.text.clear(),
+            }
+        } else if let Some(text) = update.get("content").and_then(block_text) {
+            msg.text.push_str(text);
+        }
+        let msg = msg.clone();
+        let Some((child, field)) = self.message_role(transcript, &msg) else {
+            out.push(native(kind, update));
+            return;
+        };
+        if let Some(Value::Object(record)) = self.subagents.get_mut(&child).map(|c| &mut c.record) {
+            record.insert(field.to_owned(), Value::String(msg.text));
+        }
+        self.show_subagent(&child, false, out);
+    }
+
+    /// Which child a session-directed message is about, and whether it is
+    /// that child's `prompt` (from its parent) or `report` (to its parent).
+    /// The sender is never guessed: a message without one is about nobody.
+    fn message_role(&self, transcript: &str, msg: &SessionMessage) -> Option<(String, &'static str)> {
+        let parent_of = |s: &str| self.subagents.get(s).map(|c| c.parent.as_str());
+        let (sender, recipient) = (msg.sender.as_deref(), msg.recipient.as_deref());
+        // Incoming in the child, from its parent; or outgoing in the parent.
+        if let Some(s) = sender
+            && let Some(child) = [Some(transcript), recipient]
+                .into_iter()
+                .flatten()
+                .find(|c| parent_of(c) == Some(s))
+        {
+            return Some((child.to_owned(), "prompt"));
+        }
+        // Incoming in the parent from its child; or outgoing in the child.
+        if let Some(s) = sender
+            && let Some(p) = parent_of(s)
+            && (p == transcript || recipient == Some(p))
+        {
+            return Some((s.to_owned(), "report"));
+        }
+        None
+    }
+
+    /// A tool call that names a child session (`session` content, schema
+    /// 1.34) that already has its item is no longer free for another child
+    /// to claim.
+    fn note_session_refs(&mut self, id: &str, update: &Value) {
+        let taken = session_refs(update)
+            .iter()
+            .any(|c| self.child_sessions.get(c).is_some_and(|item| item != id));
+        if taken {
+            self.unclaimed_subagents.retain(|(t, _)| t != id);
+        }
+    }
+
+    /// The item key of tool call `tool_call_id` in session `sid`: scoped to
+    /// the child when the session is an announced child, and the child.
+    fn scoped_tool(&self, sid: Option<&str>, tool_call_id: &str) -> (String, Option<(String, ItemId)>) {
+        match sid.and_then(|s| self.subagents.get(s).map(|c| (s, c))) {
+            Some((s, c)) => (
+                format!("{s}/{tool_call_id}"),
+                Some((s.to_owned(), c.item.clone())),
+            ),
+            None => (tool_call_id.to_owned(), None),
         }
     }
 
@@ -1527,6 +1861,7 @@ impl AcpDriver {
         } else {
             self.start_tool(id.to_owned(), update, None, out);
         }
+        self.note_session_refs(id, update);
         self.finish_tool_if_done(id, update, out);
     }
 
@@ -1535,19 +1870,7 @@ impl AcpDriver {
             out.push(native("tool_call_update", update));
             return;
         };
-        // Progress on a tool call means its permission was answered,
-        // possibly by another client sharing this agent.
-        // Not a question: its tool call runs on while it waits.
-        let answered: Vec<String> = self
-            .permissions
-            .iter()
-            .filter(|(_, w)| w.form.is_none() && w.tool_call_id.as_deref() == Some(id))
-            .map(|(k, _)| k.clone())
-            .collect();
-        for request_id in answered {
-            self.permissions.remove(&request_id);
-            out.push(Event::PermissionResolved { request_id });
-        }
+        self.resolve_permissions_for(id, out);
         if self.on_detached_tool(id, update, out) {
             return;
         }
@@ -1560,7 +1883,24 @@ impl AcpDriver {
                 self.items.update(id.to_owned(), strip_tag(update), out);
             }
         }
+        self.note_session_refs(id, update);
         self.finish_tool_if_done(id, update, out);
+    }
+
+    /// Progress on a tool call means its permission was answered, possibly
+    /// by another client sharing this agent. Not a question: its tool call
+    /// runs on while it waits.
+    fn resolve_permissions_for(&mut self, id: &str, out: &mut Vec<Event>) {
+        let answered: Vec<String> = self
+            .permissions
+            .iter()
+            .filter(|(_, w)| w.form.is_none() && w.tool_call_id.as_deref() == Some(id))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for request_id in answered {
+            self.permissions.remove(&request_id);
+            out.push(Event::PermissionResolved { request_id });
+        }
     }
 
     /// A report on a tool call that outlived its cancelled turn: it updates
@@ -1860,6 +2200,7 @@ impl Driver for AcpDriver {
                     "terminal": false,
                     "session": { "configOptions": { "boolean": {} }, "compaction": {} },
                     "elicitation": { "form": {} },
+                    "subagents": {},
                 },
                 "clientInfo": { "name": "acc", "title": "Agent Control Core", "version": crate::VERSION },
             }),
@@ -2267,6 +2608,25 @@ fn strip_tag(update: &Value) -> Value {
         o.remove("sessionUpdate");
     }
     v
+}
+
+/// The sessions a tool call's `session` content items name (schema 1.34).
+fn session_refs(update: &Value) -> Vec<String> {
+    update
+        .get("content")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter(|c| str_at(c, "type") == Some("session"))
+        .filter_map(|c| str_at(c, "sessionId").map(str::to_owned))
+        .collect()
+}
+
+/// The text of a text content block.
+fn block_text(block: &Value) -> Option<&str> {
+    (str_at(block, "type") == Some("text"))
+        .then(|| block.get("text").and_then(Value::as_str))
+        .flatten()
 }
 
 fn native(kind: &str, update: &Value) -> Event {

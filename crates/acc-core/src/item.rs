@@ -1005,10 +1005,15 @@ fn acp_task_output(text: &str) -> (Option<String>, Option<String>) {
     (child, (!report.is_empty()).then(|| report.to_owned()))
 }
 
+/// A subagent over ACP: its tool call, and the child session's record
+/// under `subagent` when the agent announced it with `subagent_update`
+/// (schema 1.34: `sessionId`, `title`, `description`, `state`, and the
+/// `prompt` and `report` acc took from session-directed messages).
 fn acp_subagent(name: &str, ext: &Value, output: Option<String>, text: &str) -> ItemDetail {
     let null = Value::Null;
     let input = ext.get("rawInput").unwrap_or(&null);
     let raw_out = ext.get("rawOutput").unwrap_or(&null);
+    let sub = ext.get("subagent").unwrap_or(&null);
     let (child_in_text, report) = output.as_deref().map(acp_task_output).unwrap_or_default();
     let child = raw_out
         .pointer("/metadata/sessionID")
@@ -1016,20 +1021,53 @@ fn acp_subagent(name: &str, ext: &Value, output: Option<String>, text: &str) -> 
         .or_else(|| raw_out.get("sessionId"))
         .and_then(Value::as_str)
         .map(str::to_owned)
-        .or(child_in_text);
+        .or(child_in_text)
+        .or_else(|| owned(sub, "sessionId"));
     let title = owned(ext, "title").filter(|t| !t.is_empty());
+    let label = owned(sub, "title").filter(|t| !t.is_empty());
+    // The child's work state; an idle child says why it stopped, unless it
+    // simply finished.
+    let state = sub.get("state").unwrap_or(&null);
+    let sub_status = match (str_at(state, "state"), str_at(state, "stopReason")) {
+        (Some("idle"), Some(reason)) if reason != "end_turn" => Some(reason.to_owned()),
+        (Some(s), _) => Some(s.to_owned()),
+        _ => None,
+    };
+    let failure = state
+        .pointer("/error/message")
+        .and_then(Value::as_str)
+        .map(str::to_owned);
+    let report = report
+        .or_else(|| owned(sub, "report").filter(|r| !r.is_empty()))
+        .or_else(|| (!text.is_empty()).then(|| text.to_owned()))
+        .or(failure);
+    // A child with no tool call to run under is its announcement's.
+    let tool = if ext.get("toolCallId").is_none() && !sub.is_null() {
+        "subagent_update"
+    } else {
+        name
+    };
     ItemDetail::Subagent {
-        tool: name.to_owned(),
-        agent: owned(input, "subagent_type").or_else(|| owned(input, "agent")),
-        description: owned(input, "description").or(title).unwrap_or_default(),
-        prompt: owned(input, "prompt").or_else(|| owned(input, "task")),
+        tool: tool.to_owned(),
+        agent: owned(input, "subagent_type")
+            .or_else(|| owned(input, "agent"))
+            .or_else(|| label.clone()),
+        description: owned(input, "description")
+            .or_else(|| owned(sub, "description").filter(|d| !d.is_empty()))
+            .or(title)
+            .or(label)
+            .unwrap_or_default(),
+        prompt: owned(input, "prompt")
+            .or_else(|| owned(input, "task"))
+            .or_else(|| owned(sub, "prompt").filter(|p| !p.is_empty())),
         child,
         status: raw_out
             .pointer("/metadata/status")
             .and_then(Value::as_str)
             .map(str::to_owned)
+            .or(sub_status)
             .or_else(|| owned(ext, "status")),
-        output: report.or_else(|| (!text.is_empty()).then(|| text.to_owned())),
+        output: report,
         model: raw_out
             .pointer("/metadata/model/modelID")
             .and_then(Value::as_str)
