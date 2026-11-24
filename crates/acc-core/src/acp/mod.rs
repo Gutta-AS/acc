@@ -268,6 +268,10 @@ pub struct AcpDriver {
     history: Vec<String>,
     history_next: usize,
     turn_open: bool,
+    /// Plans the agent reported with `plan_update`, by `planId`: a
+    /// `plan_removed` for any other id is ignored, as the schema asks.
+    #[serde(default)]
+    plans: BTreeSet<String>,
 
     state: Option<(RunState, Option<String>)>,
 }
@@ -325,6 +329,7 @@ impl AcpDriver {
             history: Vec::new(),
             history_next: 0,
             turn_open: false,
+            plans: BTreeSet::new(),
             state: None,
         };
         d.rebuild_commands();
@@ -868,6 +873,7 @@ impl AcpDriver {
         self.rebuild_commands();
         self.history.clear();
         self.history_next = 0;
+        self.plans.clear();
     }
 
     /// Completes whatever the turn left open. A cancelled or failed turn can
@@ -1260,7 +1266,20 @@ impl AcpDriver {
                     message: title.to_owned(),
                 });
             }
+            // Agents that don't send plan operations (or predate them).
             "plan" => out.push(Event::Plan(Plan::from_list(update.get("entries"), "content"))),
+            "plan_update" => match plan_update(update) {
+                Some(plan) => {
+                    self.plans.extend(plan.id.clone());
+                    out.push(Event::Plan(plan));
+                }
+                None => out.push(native(kind, update)),
+            },
+            "plan_removed" => {
+                if let Some(id) = str_at(update, "planId").filter(|id| self.plans.remove(*id)) {
+                    out.push(Event::PlanRemoved { id: id.to_owned() });
+                }
+            }
             _ => out.push(native(kind, update)),
         }
     }
@@ -1860,6 +1879,7 @@ impl Driver for AcpDriver {
                     "terminal": false,
                     "session": { "configOptions": { "boolean": {} }, "compaction": {} },
                     "elicitation": { "form": {} },
+                    "plan": {},
                 },
                 "clientInfo": { "name": "acc", "title": "Agent Control Core", "version": crate::VERSION },
             }),
@@ -2267,6 +2287,26 @@ fn strip_tag(update: &Value) -> Value {
         o.remove("sessionUpdate");
     }
     v
+}
+
+/// A `plan_update`'s plan: `items` (entries) or `markdown`, keyed by its
+/// `planId`. `None` for a plan without an id or of a type acc doesn't know.
+fn plan_update(update: &Value) -> Option<Plan> {
+    let plan = update.get("plan")?;
+    let id = str_at(plan, "planId")?.to_owned();
+    match str_at(plan, "type")? {
+        "items" => Some(Plan {
+            id: Some(id),
+            ..Plan::from_list(plan.get("entries"), "content")
+        }),
+        "markdown" => Some(Plan {
+            id: Some(id),
+            markdown: Some(str_at(plan, "content")?.to_owned()),
+            path: str_at(plan, "path").map(str::to_owned),
+            ..Plan::default()
+        }),
+        _ => None,
+    }
 }
 
 fn native(kind: &str, update: &Value) -> Event {

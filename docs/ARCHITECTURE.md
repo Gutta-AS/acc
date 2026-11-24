@@ -153,7 +153,10 @@ the same feed.
 
 Beside items, the main conversation's to-do list arrives whole as `Event::Plan` (Codex's
 `turn/plan/updated`, ACP's `plan` update, Claude's `TodoWrite` call, which stays a tool item too),
-and Codex's aggregated diff of the turn as `Event::TurnDiff`; each replaces the one before.
+and Codex's aggregated diff of the turn as `Event::TurnDiff`; each replaces the one before. ACP
+agents that take the `plan` client capability send plan operations instead: each `plan_update`
+(entries or Markdown) arrives as an `Event::Plan` with its `id` and replaces only the plan with
+that id, and `plan_removed` for a known id arrives as `Event::PlanRemoved`.
 Subagents' plans stay theirs. What has no common shape yet passes through as `Event::Native`.
 
 ## Interactive commands

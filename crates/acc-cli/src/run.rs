@@ -672,7 +672,13 @@ impl Printer {
                 }
             }
             Event::Plan(plan) => {
-                self.line("☰ plan");
+                match &plan.id {
+                    Some(id) => self.line(&format!("☰ plan {id}")),
+                    None => self.line("☰ plan"),
+                }
+                for l in plan.markdown.iter().flat_map(|m| m.lines()) {
+                    self.line(&format!("  {l}"));
+                }
                 for e in &plan.entries {
                     let mark = match e.status {
                         PlanStatus::Pending => ' ',
@@ -682,6 +688,7 @@ impl Printer {
                     self.line(&format!("  [{mark}] {}", e.content));
                 }
             }
+            Event::PlanRemoved { id } => self.line(&format!("☰ plan {id} removed")),
             Event::Exited { code } => self.line(&format!(
                 "● exited ({})",
                 code.map_or("signal".into(), |c| c.to_string())
