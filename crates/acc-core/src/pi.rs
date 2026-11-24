@@ -11,7 +11,11 @@
 //! which ACC surfaces as a permission request (or auto-answers via `Policy`).
 //!
 //! Checked against pi 1.4.0 (`@earendil-works/pi-coding-agent`); the fixtures
-//! in `tests/fixtures/pi/` are recorded from 1.1.0. See
+//! in `tests/fixtures/pi/` are recorded from 1.1.0, except
+//! `rpc-1.6.0-diagnostics.jsonl` (`extension_error` and stderr diagnostics)
+//! from 1.6.0. pi writes diagnostics to stderr, never stdout, so the launch
+//! script appends its stderr to the log and the driver shows each non-JSON
+//! line as a notice. See
 //! `research/commands-and-options/pi-opencode.md`.
 //!
 //! pi's session files hold the same message objects as its RPC events, so
@@ -294,7 +298,10 @@ impl PiDriver {
             }
             "session_info_changed" => {}
             "extension_ui_request" => self.on_ui_request(&v, out),
-            "extension_error" => out.push(Event::Unrecognized { raw: v.to_string() }),
+            // An extension's handler threw (pi 1.6.0+, `pi.events` handlers too).
+            "extension_error" => out.push(Event::Notice {
+                message: extension_error(&v),
+            }),
             _ => out.push(Event::Unrecognized { raw: v.to_string() }),
         }
     }
@@ -885,7 +892,10 @@ impl Driver for PiDriver {
             match frame {
                 Frame::Line(line) => match serde_json::from_str::<Value>(&line) {
                     Ok(v) => self.handle(v, &mut out),
-                    Err(_) => out.push(Event::Unrecognized { raw: line }),
+                    // stdout carries only JSONL, so any other line is pi's
+                    // stderr, which the launch script appends to the same
+                    // log (see `Protocol::stderr_in_log`).
+                    Err(_) => out.extend(stderr_notice(&line)),
                 },
                 Frame::Oversized => out.push(Event::Unrecognized {
                     raw: "<oversized record dropped>".into(),
@@ -1338,6 +1348,49 @@ pub fn add_usage(total: &mut Usage, u: &Value) {
     }
 }
 
+/// What an `extension_error` record reports: which extension, on which
+/// event, and the error.
+fn extension_error(v: &Value) -> String {
+    let field = |k: &str| v.get(k).and_then(Value::as_str).filter(|s| !s.is_empty());
+    let error = field("error").unwrap_or("unknown error");
+    match (field("extensionPath"), field("event")) {
+        (Some(path), Some(event)) => format!("Extension {path} failed on {event}: {error}"),
+        (Some(path), None) => format!("Extension {path} failed: {error}"),
+        (None, Some(event)) => format!("Extension failed on {event}: {error}"),
+        (None, None) => format!("Extension failed: {error}"),
+    }
+}
+
+/// A line pi wrote to stderr, as a notice: the diagnostics it reports
+/// there in RPC mode (`Warning: Could not restore model ...` after
+/// `switch_session` or `fork`, an extension that fails to load). Colour
+/// codes are dropped and blank lines skipped.
+fn stderr_notice(line: &str) -> Option<Event> {
+    let message = strip_ansi(line).trim().to_owned();
+    (!message.is_empty()).then_some(Event::Notice { message })
+}
+
+/// `s` without ANSI escape sequences (CSI `ESC [ ... final`, or a lone
+/// `ESC` and the byte after it).
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            out.push(c);
+            continue;
+        }
+        if chars.next() == Some('[') {
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
@@ -1346,6 +1399,11 @@ mod tests {
     const TURN: &str = include_str!("../tests/fixtures/pi/rpc-turn-with-dialog.jsonl");
     const COMMANDS: &str = include_str!("../tests/fixtures/pi/rpc-commands.jsonl");
     const HANDSHAKE: &str = include_str!("../tests/fixtures/pi/rpc-handshake.jsonl");
+    /// pi 1.6.0's stdout and stderr in one log, as the launch script writes
+    /// them: `switch_session` to a session whose model is gone, then
+    /// `new_session` after a broken extension appeared, with an extension
+    /// whose `pi.events` handler throws on every `session_start`.
+    const DIAGNOSTICS: &str = include_str!("../tests/fixtures/pi/rpc-1.6.0-diagnostics.jsonl");
 
     /// pi's stdout from a recorded fixture (lines starting `>> ` are what the
     /// recorder wrote to stdin).
@@ -1373,6 +1431,57 @@ mod tests {
                 _ => None,
             })
             .collect()
+    }
+
+    fn notices(events: &[Event]) -> Vec<&str> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Notice { message } => Some(message.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn extension_errors_and_stderr_diagnostics_are_notices() {
+        let mut d = PiDriver::new();
+        let events = d.on_output(stdout(DIAGNOSTICS).as_bytes());
+        let thrown =
+            "Extension /tmp/pirec/agent/extensions/boom.ts failed on events:acc:boom: handler blew up";
+        assert_eq!(
+            notices(&events),
+            [
+                thrown,
+                thrown,
+                "Warning: Could not restore model anthropic/claude-retired-1. Using anthropic/claude-opus-5-5",
+                thrown,
+                "Error: Failed to load extension \"/tmp/pirec/agent/extensions/broken.ts\": \
+                 Failed to load extension: cannot load",
+            ]
+        );
+        assert!(
+            !events.iter().any(|e| matches!(e, Event::Unrecognized { .. })),
+            "{events:?}"
+        );
+    }
+
+    #[test]
+    fn stderr_lines_lose_colour_codes_and_blank_lines_are_skipped() {
+        let mut d = PiDriver::new();
+        let events = d.on_output(b"\x1b[33mWarning: Could not restore model a/b. Using c/d\x1b[39m\n\n  \n");
+        assert_eq!(
+            notices(&events),
+            ["Warning: Could not restore model a/b. Using c/d"]
+        );
+        assert_eq!(events.len(), 1, "{events:?}");
+    }
+
+    #[test]
+    fn extension_error_without_details_still_says_what_failed() {
+        let mut d = PiDriver::new();
+        let events = d.on_output(b"{\"type\":\"extension_error\",\"error\":\"boom\"}\n");
+        assert_eq!(notices(&events), ["Extension failed: boom"]);
     }
 
     #[test]

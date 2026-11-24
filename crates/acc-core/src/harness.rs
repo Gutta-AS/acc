@@ -33,6 +33,17 @@ pub enum Protocol {
     PiRpc,
 }
 
+impl Protocol {
+    /// Whether the harness's stderr is appended to its log too, not only to
+    /// the session's `err` file, so the driver sees it. Only for protocols
+    /// whose stdout is strictly one JSON value per line, so a driver can
+    /// tell the two apart: pi reports diagnostics (a model it could not
+    /// restore, an extension that failed to load) only on stderr.
+    pub fn stderr_in_log(self) -> bool {
+        matches!(self, Protocol::PiRpc)
+    }
+}
+
 /// How to start a harness headless. Paths and flags are resolved on the host.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchSpec {

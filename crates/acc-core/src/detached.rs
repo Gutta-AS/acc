@@ -8,7 +8,8 @@
 //! `research/daemonless-ssh-control.md` §2 and §4.
 //!
 //! Layout under `$HOME/.acc/s/<session>/`:
-//! `in` (FIFO), `out.ndjson`, `err`, `pid`, `boot` (the host's boot id when
+//! `in` (FIFO), `out.ndjson`, `err` (and `errp`, a FIFO feeding it, for
+//! harnesses whose stderr also goes to the log), `pid`, `boot` (the host's boot id when
 //! `pid` was written, so a PID from before a reboot is never mistaken for a
 //! live harness; a harness still reading `in` is live whatever it says),
 //! `exit`, `spec.json` (one line, a
@@ -114,9 +115,20 @@ impl SessionDir {
             ),
             None => (String::new(), format!("{env}{cmd}")),
         };
+        // When the driver reads stderr too, `tee` copies it from a FIFO to
+        // both `err` and the log; both append, so whole lines don't mix.
+        let (tee, stderr) = if spec.protocol.stderr_in_log() {
+            (
+                "rm -f \"$0/errp\"; mkfifo \"$0/errp\"; \
+                 tee -a \"$0/err\" <\"$0/errp\" >>\"$0/out.ndjson\" & ",
+                "2>\"$0/errp\"",
+            )
+        } else {
+            ("", "2>>\"$0/err\"")
+        };
         let wrapper = format!(
             "cd {cwd} 2>>\"$0/err\" || {{ echo {EXIT_NO_CWD} >\"$0/exit\"; exit 1; }}; \
-             {setup}{run} <>\"$0/in\" >>\"$0/out.ndjson\" 2>>\"$0/err\" & \
+             {tee}{setup}{run} <>\"$0/in\" >>\"$0/out.ndjson\" {stderr} & \
              echo $! >\"$0/pid\"; wait $!; echo $? >\"$0/exit\"",
             cwd = quote_path(cwd),
         );
@@ -1092,6 +1104,51 @@ mod sh_tests {
             Some("opencode acp: server exited unexpectedly")
         );
         assert_eq!(parse_stderr("exited 0 3\n"), None);
+        let _ = std::fs::remove_dir_all(&home);
+    }
+
+    #[test]
+    fn pi_stderr_goes_to_the_log_and_the_err_file() {
+        let home = std::env::temp_dir().join(format!("acc-test-pierr-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("mkdir");
+        let dir = SessionDir::new("pierr").expect("valid id");
+        let spec = LaunchSpec {
+            program: "sh".into(),
+            args: vec![
+                "-c".into(),
+                "echo '{\"type\":\"a\"}'; echo 'Warning: Could not restore model x/y. Using a/b' >&2; \
+                 echo '{\"type\":\"b\"}'; echo 'Error: gone' >&2; exit 1"
+                    .into(),
+            ],
+            env: vec![],
+            protocol: Protocol::PiRpc,
+            sandbox: None,
+        };
+        let _ = sh(&home, &dir.launch_script_with_spec(&spec, "~", None), b"");
+        let session = home.join(ROOT).join("pierr");
+        let log = wait_for(&session.join("out.ndjson"), 4);
+        let mut lines: Vec<&str> = log.lines().collect();
+        lines.sort_unstable();
+        assert_eq!(
+            lines,
+            [
+                "Error: gone",
+                "Warning: Could not restore model x/y. Using a/b",
+                "{\"type\":\"a\"}",
+                "{\"type\":\"b\"}",
+            ],
+            "{log}"
+        );
+        assert_eq!(
+            wait_for(&session.join("err"), 2),
+            "Warning: Could not restore model x/y. Using a/b\nError: gone\n"
+        );
+        let out = sh(&home, &dir.status_script(), b"");
+        assert!(
+            matches!(parse_status(&out), Some(Status::Exited { code: Some(1), .. })),
+            "{out}"
+        );
+        assert_eq!(parse_stderr(&out).as_deref(), Some("Error: gone"));
         let _ = std::fs::remove_dir_all(&home);
     }
 

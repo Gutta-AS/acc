@@ -1,0 +1,9 @@
+>> {"type":"switch_session","id":"acc-1","sessionPath":"/tmp/pirec/old/s.jsonl"}
+{"type":"extension_error","extensionPath":"/tmp/pirec/agent/extensions/boom.ts","event":"events:acc:boom","error":"handler blew up"}
+{"type":"extension_error","extensionPath":"/tmp/pirec/agent/extensions/boom.ts","event":"events:acc:boom","error":"handler blew up"}
+Warning: Could not restore model anthropic/claude-retired-1. Using anthropic/claude-opus-5-5
+{"id":"acc-1","type":"response","command":"switch_session","success":true,"data":{"cancelled":false}}
+>> {"type":"new_session","id":"acc-2"}
+{"type":"extension_error","extensionPath":"/tmp/pirec/agent/extensions/boom.ts","event":"events:acc:boom","error":"handler blew up"}
+Error: Failed to load extension "/tmp/pirec/agent/extensions/broken.ts": Failed to load extension: cannot load
+{"id":"acc-2","type":"response","command":"new_session","success":true,"data":{"cancelled":false}}
