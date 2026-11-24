@@ -1102,6 +1102,30 @@ impl Session {
         }
     }
 
+    /// A new session of the same harness, model and settings on the same
+    /// directory (and worktree), whose first prompt is this conversation so
+    /// far followed by `next`. For a session that can't be resumed, such as
+    /// after a [`Session::revive`] whose harness reports
+    /// [`DriverError::SessionNotFound`] (see [`Session::failure`]). Call it
+    /// on the session that holds the conversation: the revived one starts
+    /// reading after the earlier run, so ask the session that followed that
+    /// run (or was restored from its snapshot). `replaces_parent` is set:
+    /// stop the revived run before launching.
+    pub fn fresh_start(&self, next: Option<&str>) -> LaunchRequest {
+        let prompt = crate::handoff::primer(
+            &self.transcript,
+            self.spec.harness,
+            &self.spec.cwd,
+            next,
+            crate::handoff::PRIMER_CHARS,
+        );
+        LaunchRequest {
+            resume: None,
+            prompt: Some(prompt),
+            ..self.relaunch(false, None)
+        }
+    }
+
     /// A new session of `to` on the same directory (and worktree), whose
     /// first prompt is this conversation so far followed by `next`. This
     /// session keeps running; stop it if it should end.
@@ -1165,6 +1189,15 @@ impl Session {
     /// Bytes of the log consumed so far; follow the log from here.
     pub fn offset(&self) -> u64 {
         self.offset
+    }
+
+    /// Why the harness couldn't open the session, when retrying won't help:
+    /// [`DriverError::SessionNotFound`] when it doesn't have the session
+    /// that [`Session::revive`] (or a launch with `resume`) asked for. The
+    /// state is [`RunState::Error`] by then; start afresh with
+    /// [`Session::fresh_start`].
+    pub fn failure(&self) -> Option<DriverError> {
+        self.driver.failure()
     }
 
     pub fn is_replaying(&self) -> bool {
@@ -2031,6 +2064,51 @@ mod tests {
         let (s, _) = Session::revive(&spec, "b").unwrap();
         assert_eq!(s.spec().resume.as_deref(), Some("abc"));
         assert_eq!(s.spec().launch, spec.launch, "no resume flag on the command line");
+    }
+
+    #[test]
+    fn a_revive_the_harness_has_lost_starts_afresh_with_the_conversation() {
+        let (mut first, _) = Session::launch(req(Harness::Antigravity), "s1", "a", 1).unwrap();
+        let mut spec = first.spec().clone();
+        spec.native_id = Some("lost".into());
+        // The conversation the earlier run had, as its client saw it.
+        first.feed(
+            br#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"lost","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"done so far"}}}}"#,
+            2,
+        );
+        first.feed(b"\n", 2);
+
+        let (mut s, _) = Session::revive(&spec, "b").unwrap();
+        s.on_launched("42\nL 0\n");
+        let ids: Vec<Value> = String::from_utf8(s.take_transmit())
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str::<Value>(l).unwrap()["id"].clone())
+            .collect();
+        let init = format!(
+            r#"{{"jsonrpc":"2.0","id":{},"result":{{"protocolVersion":1,"agentCapabilities":{{"loadSession":true}}}}}}"#,
+            ids[0]
+        );
+        s.feed(format!("{init}\n").as_bytes(), 3);
+        let load: Value = serde_json::from_slice(&s.take_transmit()).unwrap();
+        assert_eq!(load["method"], "session/load");
+        assert_eq!(s.failure(), None);
+        let gone = format!(
+            r#"{{"jsonrpc":"2.0","id":{},"error":{{"code":-32002,"message":"Resource not found"}}}}"#,
+            load["id"]
+        );
+        s.feed(format!("{gone}\n").as_bytes(), 4);
+        assert_eq!(s.state().map(|st| st.state.clone()), Some(RunState::Error));
+        assert_eq!(s.failure(), Some(DriverError::SessionNotFound("lost".into())));
+
+        let r = first.fresh_start(Some("go on"));
+        assert_eq!(r.harness, Some(Harness::Antigravity));
+        assert!(r.resume.is_none() && !r.fork && r.replaces_parent);
+        assert_eq!(r.parent.as_deref(), Some("s1"));
+        assert_eq!(r.model, first.spec().model);
+        let prompt = r.prompt.unwrap();
+        assert!(prompt.contains("done so far"), "{prompt}");
+        assert!(prompt.ends_with("go on"), "{prompt}");
     }
 
     #[test]

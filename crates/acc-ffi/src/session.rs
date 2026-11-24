@@ -237,6 +237,22 @@ impl AccSession {
         lock(&self.inner).state().cloned().map(Into::into)
     }
 
+    /// Why the harness couldn't open the session, when retrying won't help:
+    /// `SessionNotFound` once the harness says it doesn't have the session
+    /// `revive` resumed. The state is `Error` by then.
+    pub fn failure(&self) -> Option<AccError> {
+        lock(&self.inner).failure().map(Into::into)
+    }
+
+    /// A new session of the same harness and settings, primed with this
+    /// session's conversation and `next`, for one whose harness lost it
+    /// (`failure` is `SessionNotFound`). Ask the session that followed the
+    /// earlier run (or was restored from its snapshot): a revived one starts
+    /// reading after it. Stop the revived run, then `launch` this.
+    pub fn fresh_start(&self, next: Option<String>) -> AccLaunchRequest {
+        lock(&self.inner).fresh_start(next.as_deref()).into()
+    }
+
     pub fn items(&self) -> Vec<AccItem> {
         let s = lock(&self.inner);
         s.transcript().items().iter().map(item).collect()

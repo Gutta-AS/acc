@@ -279,6 +279,12 @@ only reuses the PID doesn't hold that pipe. Nothing brings it back on its own: t
 relaunches the same id from `spec.json` and resumes the harness's own session (`native_id`) with the
 stored model, permission, system prompt, launcher, worktree, sandbox, title and labels. It fails with
 `NotResumable` when the harness never reported its id, and with `EXIT_RUNNING` while it still runs.
+A harness that no longer has the session answers the resume itself: an ACP agent's `session/load` or
+`session/resume` fails with `-32002` (Antigravity from 1.5.15), the state turns `Error`, and
+`Session::failure` (`failure` in ffi and wasm) says `SessionNotFound`. `Session::fresh_start(next)` then gives a
+`LaunchRequest` for a new session of the same harness and settings, primed with the conversation like
+a handoff. Ask the session that followed the earlier run, or was restored from its snapshot, because the
+revived one starts reading after that run.
 The new run appends to the same log. The launch output's `L <bytes>` line tells the launching client
 where its own run starts: `on_launched` moves `offset` there, so the new driver never matches the old
 process's replies. Clients that followed the earlier run saw it exit, and they attach again.

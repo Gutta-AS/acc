@@ -2311,3 +2311,118 @@ fn session_mcp_servers_ride_along_when_a_session_opens() {
     );
     assert_eq!(one(&d.poll_transmit())["params"]["mcpServers"], json!([]));
 }
+
+fn error_reply(id: Value, code: i64, message: &str) -> Value {
+    json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } })
+}
+
+/// A resuming driver that has sent `session/load` (or `session/resume`).
+fn resuming(harness: Harness, caps: Value) -> (AcpDriver, Value) {
+    let mut d = driver(
+        harness,
+        Start::Resume {
+            session_id: "gone".into(),
+        },
+    );
+    d.handshake();
+    feed(&mut d, &[result("acc-0", init_result(caps))]);
+    let open = one(&d.poll_transmit());
+    (d, open)
+}
+
+#[test]
+fn a_session_the_agent_does_not_have_is_reported_as_not_found() {
+    // Antigravity 1.5.15 answers an unknown id with -32002.
+    for (caps, method) in [
+        (json!({ "loadSession": true }), "session/load"),
+        (
+            json!({ "sessionCapabilities": { "resume": {} } }),
+            "session/resume",
+        ),
+    ] {
+        let (mut d, open) = resuming(Harness::Antigravity, caps);
+        assert_eq!(open["method"], method);
+        let events = feed(
+            &mut d,
+            &[error_reply(
+                open["id"].clone(),
+                -32002,
+                "Resource not found: gone",
+            )],
+        );
+        let Some(Event::StateChanged(s)) = events.first() else {
+            panic!("{events:?}")
+        };
+        assert_eq!(s.state, RunState::Error);
+        assert_eq!(s.message.as_deref(), Some("the harness has no session gone"));
+        assert_eq!(d.failure(), Some(DriverError::SessionNotFound("gone".into())));
+        assert!(!d.replaying);
+        // It survives a snapshot.
+        let back: AcpDriver = serde_json::from_value(d.snapshot().expect("snapshot")).expect("restore");
+        assert_eq!(back.failure(), d.failure());
+    }
+
+    // Other errors (and Antigravity before 1.5.15, which said -32603) stay generic.
+    let (mut d, open) = resuming(Harness::Antigravity, json!({ "loadSession": true }));
+    let events = feed(
+        &mut d,
+        &[error_reply(open["id"].clone(), -32603, "Internal error")],
+    );
+    assert_eq!(states(&events), [RunState::Error]);
+    assert_eq!(d.failure(), None);
+    // -32002 for a new session isn't about a session to resume.
+    let mut d = driver(Harness::Antigravity, Start::New);
+    d.handshake();
+    feed(&mut d, &[result("acc-0", init_result(json!({})))]);
+    let new = one(&d.poll_transmit());
+    feed(&mut d, &[error_reply(new["id"].clone(), -32002, "nope")]);
+    assert_eq!(d.failure(), None);
+}
+
+#[test]
+fn a_prompt_asked_again_while_loading_still_waits_after_the_reply() {
+    // Antigravity 1.5.15 replays history, asks the running session's open
+    // prompts again, and only then answers `session/load`.
+    let (mut d, open) = resuming(Harness::Antigravity, json!({ "loadSession": true }));
+    let events = feed(
+        &mut d,
+        &[
+            update("gone", text_chunk("user_message_chunk", "clean up")),
+            update(
+                "gone",
+                json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "rm -rf build", "kind": "execute" }),
+            ),
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "session/request_permission", "params": {
+            "sessionId": "gone", "toolCall": { "toolCallId": "t1", "title": "rm -rf build", "kind": "execute" },
+            "options": [{ "optionId": "allow-once", "name": "Allow", "kind": "allow_once" }] } }),
+            result(open["id"].clone(), antigravity_session("gone", "default")),
+        ],
+    );
+    assert_eq!(
+        states(&events),
+        [RunState::Blocked {
+            kind: BlockKind::Permission
+        }],
+        "the replay is not live work and the reply doesn't clear the prompt"
+    );
+    assert!(events.iter().any(|e| matches!(e, Event::SessionStarted { .. })));
+    let answer = one(&d
+        .command(Command::AnswerPermission {
+            request_id: "7".into(),
+            option_id: "allow-once".into(),
+        })
+        .expect("answer"));
+    assert_eq!(answer["id"], 7);
+    assert_eq!(answer["result"]["outcome"]["optionId"], "allow-once");
+
+    // Without a prompt waiting, the reply leaves the session idle.
+    let (mut d, open) = resuming(Harness::Antigravity, json!({ "loadSession": true }));
+    let events = feed(
+        &mut d,
+        &[
+            update("gone", text_chunk("user_message_chunk", "hi")),
+            result(open["id"].clone(), antigravity_session("gone", "default")),
+        ],
+    );
+    assert_eq!(states(&events), [RunState::Idle]);
+}

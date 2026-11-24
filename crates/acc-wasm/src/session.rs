@@ -22,6 +22,7 @@ pub(crate) fn session_error(e: SessionError) -> JsValue {
         SessionError::Driver(DriverError::MissingArgument(_)) => "MissingArgument",
         SessionError::Driver(DriverError::Unsupported { .. }) => "Unsupported",
         SessionError::Driver(DriverError::AttachmentRejected(_)) => "AttachmentRejected",
+        SessionError::Driver(DriverError::SessionNotFound(_)) => "SessionNotFound",
         SessionError::NotResumable(_) => "NotResumable",
         _ => "InvalidSession",
     };
@@ -255,6 +256,26 @@ impl AccSession {
     /// `SessionState` JSON, or `null`.
     pub fn state(&self) -> JsValue {
         js(&self.inner.state())
+    }
+
+    /// Why the harness couldn't open the session, when retrying won't help,
+    /// as an `AccError` (`kind` `SessionNotFound` once the harness says it
+    /// doesn't have the session `revive` resumed), or `null`. The state is
+    /// `error` by then.
+    pub fn failure(&self) -> JsValue {
+        self.inner
+            .failure()
+            .map_or(JsValue::NULL, |e| session_error(e.into()))
+    }
+
+    /// A `LaunchRequest` for a new session of the same harness and settings,
+    /// primed with this session's conversation and `next`, for one whose
+    /// harness lost it (`failure` is `SessionNotFound`). Ask the session that
+    /// followed the earlier run (or was restored from its snapshot): a
+    /// revived one starts reading after it. Stop the revived run, then
+    /// `launch` this.
+    pub fn fresh_start(&self, next: Option<String>) -> JsValue {
+        js(&self.inner.fresh_start(next.as_deref()))
     }
 
     /// JSON array of `Item`s.

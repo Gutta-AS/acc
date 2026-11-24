@@ -111,6 +111,10 @@ pub enum AccError {
     /// session id to resume.
     #[error("session {session_id} can't be recovered: its harness never reported a session id")]
     NotResumable { session_id: String },
+    /// The harness has no session by this native id to resume (lost after a
+    /// reboot, or never there). Start afresh with `AccSession.fresh_start`.
+    #[error("the harness has no session {native_id}")]
+    SessionNotFound { native_id: String },
     #[error("remote script failed (exit {exit_code:?}): {stderr}")]
     Remote { exit_code: Option<u32>, stderr: String },
     /// A detached session's spec, snapshot or agent record didn't read.
@@ -140,6 +144,7 @@ impl From<DriverError> for AccError {
             DriverError::AttachmentRejected(_) => Self::AttachmentRejected {
                 reason: e.to_string(),
             },
+            DriverError::SessionNotFound(native_id) => Self::SessionNotFound { native_id },
         }
     }
 }
