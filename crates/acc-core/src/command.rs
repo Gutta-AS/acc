@@ -22,6 +22,19 @@ pub enum Command {
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         attachments: Vec<Attachment>,
     },
+    /// Stop the running turn with the harness's own cancel. Whether background
+    /// work the turn started (shells, dev servers, background subagents) stops
+    /// too depends on the harness; ACC stops nothing else itself:
+    ///
+    /// - Claude (`interrupt` control request), Codex (`turn/interrupt`), pi
+    ///   (`abort`), Cursor and opencode (ACP `session/cancel`): not confirmed
+    ///   by a recording.
+    /// - Copilot (ACP `session/cancel`, CLI 1.0.106+): background tasks and
+    ///   shell commands keep running.
+    /// - Antigravity (ACP `session/cancel`, agy 1.5.10+): its subagents and
+    ///   background tasks stop too. Earlier versions left them running.
+    ///
+    /// See "Interrupt" in `docs/ARCHITECTURE.md`.
     Interrupt,
     Compact {
         hint: Option<String>,
