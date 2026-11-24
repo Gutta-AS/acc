@@ -248,13 +248,16 @@ CI runs its tests against a real sshd.
 ## Daemonless sessions
 
 `acc_core::detached` generates host-side shell scripts: the harness runs under `nohup` with stdin on
-a FIFO opened read-write (no EOF when a client leaves) and stdout appended to `out.ndjson`. Clients
+a FIFO opened read-write (no EOF when a client leaves) and stdout appended to `out.ndjson`; stderr
+goes to `err`, and for pi (whose stdout is strict JSONL and whose diagnostics go only to stderr,
+`Protocol::stderr_in_log`) also to `out.ndjson` through `tee`, where the driver shows each non-JSON
+line as a notice. Clients
 attach with `tail -c +OFFSET -f` and write through a `mkdir` lock (FIFO writes are only atomic up to
 512 bytes on macOS). Disconnects lose nothing, and several clients (desktop and phone) can share one
 session.
 
 Every client reads and writes the same layout under `~/.acc/s/<id>/`, whichever layer started the
-session: `in` (FIFO), `out.ndjson`, `err`, `pid`, `boot`, `exit`, `spec.json` (one line, a
+session: `in` (FIFO), `out.ndjson`, `err` (and `errp`, the FIFO `tee` reads, for pi), `pid`, `boot`, `exit`, `spec.json` (one line, a
 `session::SessionSpec`: harness, cwd, launch command, model, native id, title, labels, launcher),
 `sent` (write ids already delivered), `lock`, and `events.ndjson`, `watch.pid` and `watch.tail`
 while a follower runs (below). The status line is `alive <pid> <log bytes>`,
