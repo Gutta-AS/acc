@@ -1690,6 +1690,8 @@ fn turn_error(err: &Value) -> Option<String> {
         Some("policyCapacityUnavailable") => "No capacity for this model",
         // The API's `budget_reached` (0.168): terminal, retrying cannot help.
         Some("sessionBudgetExceeded") => "Session budget reached",
+        // Was the generic `other` before 0.171.
+        Some("bioPolicy") => "Blocked by usage policy",
         _ => return msg.map(|m| wire::one_line(m, 200)),
     };
     Some(wire::one_line(

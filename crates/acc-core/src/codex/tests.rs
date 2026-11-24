@@ -399,6 +399,22 @@ fn model_not_found_is_final_and_named() {
     assert_eq!(turn_error(&err).as_deref(), Some("No capacity for this model"));
     let err = json!({"message": "", "codexErrorInfo": "sessionBudgetExceeded"});
     assert_eq!(turn_error(&err).as_deref(), Some("Session budget reached"));
+    let err = json!({"message": "", "codexErrorInfo": "bioPolicy"});
+    assert_eq!(turn_error(&err).as_deref(), Some("Blocked by usage policy"));
+}
+
+#[test]
+fn bio_policy_failure_is_final_and_named() {
+    let mut d = started();
+    let events = feed(
+        &mut d,
+        json!({"method": "turn/completed", "params": {"threadId": THREAD, "turn": {"id": "t1", "status": "failed",
+        "error": {"message": "This request was flagged", "codexErrorInfo": "bioPolicy"}}}}),
+    );
+    assert!(events.iter().any(|e| matches!(e,
+        Event::StateChanged(s) if s.state == RunState::Error
+            && s.message.as_deref() == Some("Blocked by usage policy: This request was flagged"))));
+    assert_eq!(events.last(), Some(&Event::TurnCompleted));
 }
 
 #[test]
