@@ -338,9 +338,13 @@ pub enum AccEvent {
     Panel {
         panel: AccPanel,
     },
-    /// The agent's to-do list; replaces the previous one.
+    /// The agent's to-do list; replaces the previous one with the same id.
     Plan {
         plan: AccPlan,
+    },
+    /// The plan with this id was cancelled; only sent for a known plan.
+    PlanRemoved {
+        id: String,
     },
     /// The turn's aggregated unified diff so far; replaces the previous one.
     TurnDiff {
@@ -436,6 +440,7 @@ impl From<Event> for AccEvent {
             Event::Notice { message } => Self::Notice { message },
             Event::Panel(panel) => Self::Panel { panel: panel.into() },
             Event::Plan(plan) => Self::Plan { plan: plan.into() },
+            Event::PlanRemoved { id } => Self::PlanRemoved { id },
             Event::TurnDiff { turn_id, diff } => Self::TurnDiff { turn_id, diff },
             Event::TurnCompleted => Self::TurnCompleted,
             Event::Exited { code } => Self::Exited { code },
@@ -839,10 +844,17 @@ impl From<Panel> for AccPanel {
     }
 }
 
-/// The agent's to-do list, whole.
+/// The agent's to-do list, whole: entries, or a Markdown document.
 #[derive(Debug, Clone, PartialEq, Eq, uniffi::Record)]
 pub struct AccPlan {
+    /// Which plan this is, when the harness keeps several (ACP's `planId`).
+    pub id: Option<String>,
+    /// Empty when the plan is a Markdown document.
     pub entries: Vec<AccPlanEntry>,
+    /// The whole plan as Markdown, instead of entries.
+    pub markdown: Option<String>,
+    /// The absolute path of the file holding a Markdown plan, if any.
+    pub path: Option<String>,
     /// Why the plan is what it is, when the harness says (Codex).
     pub explanation: Option<String>,
 }
@@ -857,6 +869,7 @@ pub struct AccPlanEntry {
 impl From<Plan> for AccPlan {
     fn from(p: Plan) -> Self {
         Self {
+            id: p.id,
             entries: p
                 .entries
                 .into_iter()
@@ -866,6 +879,8 @@ impl From<Plan> for AccPlan {
                     priority: e.priority.map(Into::into),
                 })
                 .collect(),
+            markdown: p.markdown,
+            path: p.path,
             explanation: p.explanation,
         }
     }

@@ -122,8 +122,15 @@ pub enum Event {
     /// with the same `id` replaces the old one.
     Panel(Panel),
     /// The agent's to-do list for the main conversation (Codex's turn plan,
-    /// ACP's plan, Claude's `TodoWrite`). A newer plan replaces the old one.
+    /// ACP's plan, Claude's `TodoWrite`). A newer plan with the same `id`
+    /// replaces the old one whole, even when it switches between entries
+    /// and Markdown; plans with other ids stay.
     Plan(Plan),
+    /// The plan with this `id` was cancelled or abandoned (ACP's
+    /// `plan_removed`). Only sent for a plan reported before.
+    PlanRemoved {
+        id: String,
+    },
     /// The turn's aggregated unified diff so far, for clients that show one
     /// per turn rather than per file-change item. A newer one replaces it.
     TurnDiff {
@@ -254,10 +261,24 @@ pub struct QuotaWindow {
     pub status: Option<String>,
 }
 
-/// The agent's to-do list, whole.
+/// The agent's to-do list, whole: a checklist in `entries`, or a
+/// Markdown document in `markdown`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
+    /// Which plan this is, when the harness keeps several (ACP's `planId`).
+    /// `None` is the session's single unnamed plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Empty when the plan is a Markdown document.
     pub entries: Vec<PlanEntry>,
+    /// The whole plan as Markdown, when the harness sends one (ACP's
+    /// `markdown` plans) instead of entries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub markdown: Option<String>,
+    /// The absolute path of the file that holds a Markdown plan, when it
+    /// has one. Not needed to show the plan.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// Why the plan is what it is, when the harness says (Codex).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub explanation: Option<String>,
@@ -283,7 +304,7 @@ impl Plan {
             .collect();
         Self {
             entries,
-            explanation: None,
+            ..Self::default()
         }
     }
 }

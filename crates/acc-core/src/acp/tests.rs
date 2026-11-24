@@ -798,8 +798,83 @@ fn split_reads_give_the_same_events() {
                 priority: Some(PlanPriority::Low),
             },
         ],
-        explanation: None,
+        ..Plan::default()
     })));
+}
+
+#[test]
+fn plan_operations_key_plans_by_id() {
+    let mut d = ready_copilot();
+    let plans = |events: Vec<Event>| -> Vec<Event> {
+        events
+            .into_iter()
+            .filter(|e| {
+                matches!(
+                    e,
+                    Event::Plan(_) | Event::PlanRemoved { .. } | Event::Native { .. }
+                )
+            })
+            .collect()
+    };
+    let events = plans(feed(
+        &mut d,
+        &[
+            update(
+                "s1",
+                json!({ "sessionUpdate": "plan_update", "plan": { "type": "items", "planId": "p1",
+                    "entries": [{ "content": "Read", "priority": "high", "status": "completed" }] } }),
+            ),
+            // The same id switches to Markdown: it replaces the checklist.
+            update(
+                "s1",
+                json!({ "sessionUpdate": "plan_update", "plan": { "type": "markdown", "planId": "p1",
+                    "content": "## Steps\n- [ ] Fix", "path": "/w/PLAN.md" } }),
+            ),
+            update("s1", json!({ "sessionUpdate": "plan_removed", "planId": "p1" })),
+            // Unknown and already removed ids are ignored.
+            update("s1", json!({ "sessionUpdate": "plan_removed", "planId": "p1" })),
+            update("s1", json!({ "sessionUpdate": "plan_removed", "planId": "nope" })),
+        ],
+    ));
+    assert_eq!(
+        events,
+        [
+            Event::Plan(Plan {
+                id: Some("p1".into()),
+                entries: vec![PlanEntry {
+                    content: "Read".into(),
+                    status: PlanStatus::Completed,
+                    priority: Some(PlanPriority::High),
+                }],
+                ..Plan::default()
+            }),
+            Event::Plan(Plan {
+                id: Some("p1".into()),
+                markdown: Some("## Steps\n- [ ] Fix".into()),
+                path: Some("/w/PLAN.md".into()),
+                ..Plan::default()
+            }),
+            Event::PlanRemoved { id: "p1".into() },
+        ]
+    );
+}
+
+#[test]
+fn plan_updates_of_unknown_types_stay_native() {
+    let mut d = ready_copilot();
+    let events = feed(
+        &mut d,
+        &[update(
+            "s1",
+            json!({ "sessionUpdate": "plan_update", "plan": { "type": "diagram", "planId": "p1" } }),
+        )],
+    );
+    assert!(events.iter().all(|e| !matches!(e, Event::Plan(_))));
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::Native { kind, .. } if kind == "plan_update"))
+    );
 }
 
 #[test]
@@ -1464,11 +1539,12 @@ fn ready_opencode(caps: Value) -> AcpDriver {
 }
 
 #[test]
-fn handshake_asks_for_compaction_updates_and_forms() {
+fn handshake_asks_for_compaction_updates_forms_and_plans() {
     let mut d = driver(Harness::Opencode, Start::New);
     let caps = one(&d.handshake())["params"]["clientCapabilities"].clone();
     assert_eq!(caps["session"]["compaction"], json!({}));
     assert_eq!(caps["elicitation"], json!({ "form": {} }));
+    assert_eq!(caps["plan"], json!({}));
 }
 
 #[test]

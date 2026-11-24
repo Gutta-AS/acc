@@ -32,9 +32,9 @@ fn json_lines(s: &str) -> Vec<Value> {
                 *info = Value::Null;
             }
             // Capabilities added since the recording (compaction updates,
-            // form elicitation) don't change these turns.
+            // form elicitation, plan operations) don't change these turns.
             if let Some(caps) = v.pointer_mut("/params/clientCapabilities") {
-                for (path, key) in [("", "elicitation"), ("/session", "compaction")] {
+                for (path, key) in [("", "elicitation"), ("", "plan"), ("/session", "compaction")] {
                     if let Some(o) = caps.pointer_mut(path).and_then(Value::as_object_mut) {
                         o.remove(key);
                     }

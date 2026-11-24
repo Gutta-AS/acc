@@ -474,10 +474,14 @@ pub enum Event {
     Panel {
         panel_json: String,
     },
-    /// The agent's to-do list, replacing the previous one, as
-    /// `acc_core::event::Plan` JSON.
+    /// The agent's to-do list, replacing the previous one with the same
+    /// id, as `acc_core::event::Plan` JSON.
     Plan {
         plan_json: String,
+    },
+    /// The plan with this id was cancelled; only sent for a known plan.
+    PlanRemoved {
+        id: String,
     },
     /// The turn's aggregated unified diff so far.
     TurnDiff {
@@ -582,6 +586,7 @@ impl From<core_ev::Event> for Event {
             E::Plan(plan) => Self::Plan {
                 plan_json: serde_json::to_string(&plan).unwrap_or_default(),
             },
+            E::PlanRemoved { id } => Self::PlanRemoved { id },
             E::TurnDiff { turn_id, diff } => Self::TurnDiff { turn_id, diff },
         }
     }

@@ -291,6 +291,23 @@ export interface UsageRollup {
   days: { date: string; spend: Spend; harnesses: { harness: HarnessId; spend: Spend }[] }[];
 }
 
+export interface PlanEntry {
+  content: string;
+  status: "pending" | "in_progress" | "completed";
+  priority?: "high" | "medium" | "low";
+}
+
+/** The agent's to-do list, whole: `entries`, or a Markdown document in `markdown`.
+ *  A plan replaces the previous one with the same `id` (absent: the single unnamed plan). */
+export interface Plan {
+  id?: string;
+  entries: PlanEntry[];
+  markdown?: string;
+  /** Absolute path of the file holding a Markdown plan, if any. */
+  path?: string;
+  explanation?: string;
+}
+
 export type Event =
   | { type: "session_started"; harness: HarnessId; native_id: string; model: string | null }
   | ({ type: "state_changed" } & SessionState)
@@ -317,6 +334,8 @@ export type Event =
   | { type: "commands_changed" }
   | { type: "options_changed" }
   | { type: "notice"; message: string }
+  | ({ type: "plan" } & Plan)
+  | { type: "plan_removed"; id: string }
   | { type: "turn_completed" }
   | { type: "exited"; code: number | null }
   | { type: "unrecognized"; raw: string }
