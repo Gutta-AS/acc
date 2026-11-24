@@ -60,6 +60,10 @@ const METHOD_NOT_FOUND: i64 = -32601;
 const MAX_EARLY: usize = 1024;
 /// ACP "authentication required".
 const AUTH_REQUIRED: i64 = -32000;
+/// ACP "resource not found": `session/load` or `session/resume` of a
+/// session the agent doesn't have (Antigravity 1.5.15 sends it; earlier
+/// versions said -32603).
+const RESOURCE_NOT_FOUND: i64 = -32002;
 /// How opencode titles a session it hasn't named yet (`New session - <ISO time>`).
 const PLACEHOLDER_TITLE: &str = "New session - ";
 
@@ -225,6 +229,9 @@ pub struct AcpDriver {
     titled: bool,
     /// `session/load` is replaying history; don't treat it as live activity.
     replaying: bool,
+    /// The session to resume that the agent said it doesn't have.
+    #[serde(default)]
+    missing_session: Option<String>,
     opts: OptionState,
     harness_commands: Vec<CommandEntry>,
     commands: Vec<CommandEntry>,
@@ -305,6 +312,7 @@ impl AcpDriver {
             session_id: None,
             titled: false,
             replaying: false,
+            missing_session: None,
             opts,
             harness_commands: Vec::new(),
             commands: Vec::new(),
@@ -712,6 +720,14 @@ impl AcpDriver {
                     out,
                 );
             }
+            Pending::Load { session_id } | Pending::Resume { session_id }
+                if code == Some(RESOURCE_NOT_FOUND) =>
+            {
+                self.replaying = false;
+                let err = DriverError::SessionNotFound(session_id.clone());
+                self.missing_session = Some(session_id);
+                self.fail(&err.to_string(), out);
+            }
             Pending::Initialize
             | Pending::Authenticate
             | Pending::NewSession
@@ -841,7 +857,12 @@ impl AcpDriver {
         });
         out.push(Event::OptionsChanged);
         self.refresh_palette(out);
-        self.set_state(RunState::Idle, None, out);
+        // A prompt the agent asked while `session/load` replayed (Antigravity
+        // 1.5.15 asks a running session's open prompts again) still waits.
+        let blocked = matches!(self.state, Some((RunState::Blocked { .. }, _)));
+        if !blocked || self.permissions.is_empty() {
+            self.set_state(RunState::Idle, None, out);
+        }
         for (sid, msg) in std::mem::take(&mut self.early) {
             if self.session_id.as_deref() == Some(sid.as_str()) {
                 self.on_notification("session/update", &msg, out);
@@ -1833,6 +1854,10 @@ impl Driver for AcpDriver {
 
     fn snapshot(&self) -> Option<Value> {
         serde_json::to_value(self).ok()
+    }
+
+    fn failure(&self) -> Option<DriverError> {
+        self.missing_session.clone().map(DriverError::SessionNotFound)
     }
 
     /// The ACP entry point. Resume happens in-protocol ([`Start::Resume`]),

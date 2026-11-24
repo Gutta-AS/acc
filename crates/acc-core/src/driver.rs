@@ -29,6 +29,11 @@ pub enum DriverError {
     /// [`crate::command::validate_attachments`].
     #[error("attachment rejected: {0}")]
     AttachmentRejected(String),
+    /// The harness has no session by this native id (lost with its state,
+    /// or never there), so it can't be resumed. Start a new session primed
+    /// with the conversation instead ([`crate::session::Session::fresh_start`]).
+    #[error("the harness has no session {0}")]
+    SessionNotFound(String),
 }
 
 /// Translates between one harness protocol and ACC's model.
@@ -89,6 +94,13 @@ pub trait Driver: Send {
     }
 
     fn on_history(&mut self, _output: &str) {}
+
+    /// Why the session couldn't open, when that calls for something other
+    /// than retrying: [`DriverError::SessionNotFound`] when the harness
+    /// doesn't know the session it was asked to resume.
+    fn failure(&self) -> Option<DriverError> {
+        None
+    }
 
     /// The driver's whole state, for [`crate::session::Session::snapshot`].
     /// Restored by deserializing the concrete driver for the harness.
