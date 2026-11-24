@@ -79,6 +79,23 @@ to its transcript. Claude's reply to `rename_session` doesn't carry the name, so
 client follows it with `get_status`, whose `Session name` row every client reading the log adopts.
 A rename made outside ACC (claude.ai, an IDE) still shows only at the next `get_status`.
 
+**Interrupt.** `Command::Interrupt` always stops the turn that is running. Whether it also stops
+background work the turn started (background shells, dev servers, background subagents) depends on the
+harness. ACC sends the harness's own cancel and stops nothing else itself, so a client must not assume
+either result:
+
+| Harness | ACC sends | Background work after an interrupt |
+|---|---|---|
+| Claude | `control_request` `interrupt` | not confirmed by a recording |
+| Codex | `turn/interrupt` for the current turn (a no-op when no turn is running) | not confirmed by a recording |
+| pi | `abort` | not confirmed by a recording |
+| Cursor | ACP `session/cancel` | not confirmed by a recording |
+| Copilot | ACP `session/cancel` | keeps running: cancel stops only the active turn, and background tasks and shell commands go on (Copilot CLI 1.0.106+, ACP v2's foreground-only cancel) |
+| opencode | ACP `session/cancel` | not confirmed by a recording (opencode 2.3 runs subagents and timed-out shells in the background) |
+| Antigravity | ACP `session/cancel` | stopped: cancelling a prompt or closing the session stops its subagents and background tasks, such as dev servers (agy 1.5.10+; earlier versions left them running) |
+
+A background subagent that keeps running stays `Running` in the transcript (see **Items**).
+
 **Images.** `Command::Prompt` and `LaunchRequest` carry `Attachment`s: images inline as base64, so
 nothing is copied to the host first and the bytes ride the same stdin path as text. Every
 harness takes them in its prompt: Claude as Anthropic `image` content blocks, Codex as
@@ -118,10 +135,10 @@ ACP harnesses). A prompt sent before the driver has a session (`AcpDriver` befor
 flushed once it does, rather than dropped with `DriverError::NotStarted`; Claude, pi and the rest of
 ACP's commands have no such readiness gate.
 
-`Command::Interrupt` sends `session/cancel`, which stops only the foreground turn: background tasks and shell
-commands keep running (Copilot CLI 1.0.106, ACP v2). Tool calls the cancelled turn left open are closed with it,
-and their later `tool_call_update`s update the item (and complete it again when final) without moving the
-`RunState` back to `Working`.
+`Command::Interrupt` sends `session/cancel`. What else it stops depends on the agent (see **Interrupt**
+above): Copilot keeps background work running and Antigravity stops it. Tool calls the cancelled turn left open
+are closed with it, and their later `tool_call_update`s update the item (and complete it again when final)
+without moving the `RunState` back to `Working`.
 
 ## Items
 
