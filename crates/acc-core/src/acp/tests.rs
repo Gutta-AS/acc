@@ -2311,3 +2311,319 @@ fn session_mcp_servers_ride_along_when_a_session_opens() {
     );
     assert_eq!(one(&d.poll_transmit())["params"]["mcpServers"], json!([]));
 }
+
+// Subagent sessions, stable in ACP schema 1.34. The frames follow the
+// examples on the schema's Subagents page.
+
+fn subagent_update(owner: &str, fields: Value) -> Value {
+    let mut u = json!({ "sessionUpdate": "subagent_update" });
+    u.as_object_mut()
+        .expect("object")
+        .extend(fields.as_object().expect("object").clone());
+    update(owner, u)
+}
+
+fn started<'a>(events: &'a [Event], want: &str) -> (&'a ItemKind, &'a Option<ItemId>, &'a ItemDetail) {
+    events
+        .iter()
+        .find_map(|e| match e {
+            Event::ItemStarted {
+                id,
+                kind,
+                parent,
+                detail,
+                ..
+            } if id == want => Some((kind, parent, detail)),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{want} not started in {events:#?}"))
+}
+
+/// The last detail reported for item `want`.
+fn last_detail(events: &[Event], want: &str) -> ItemDetail {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::ItemStarted { id, detail, .. }
+            | Event::ItemUpdated { id, detail, .. }
+            | Event::ItemCompleted { id, detail, .. }
+                if id == want =>
+            {
+                Some(detail.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("no detail for {want}"))
+}
+
+fn completed(events: &[Event], want: &str) -> Option<ItemStatus> {
+    events.iter().find_map(|e| match e {
+        Event::ItemCompleted { id, status, .. } if id == want => Some(*status),
+        _ => None,
+    })
+}
+
+#[test]
+fn handshake_advertises_subagent_sessions() {
+    let mut d = driver(Harness::Copilot, Start::New);
+    let init = one(&d.handshake());
+    assert_eq!(init["params"]["clientCapabilities"]["subagents"], json!({}));
+}
+
+#[test]
+fn announced_child_runs_under_its_task_call() {
+    let mut d = ready_copilot();
+    let ev = feed(
+        &mut d,
+        &[
+            update(
+                "s1",
+                json!({ "sessionUpdate": "tool_call", "toolCallId": "call_001", "title": "Task", "kind": "other",
+                    "status": "in_progress",
+                    "rawInput": { "subagent_type": "investigator", "description": "Investigate Windows tests",
+                        "prompt": "Find out why the integration tests fail on Windows." } }),
+            ),
+            subagent_update(
+                "s1",
+                json!({ "sessionId": "sess_child_1", "title": "Test investigator",
+                    "description": "Investigates platform-specific test failures.", "capabilities": { "cancel": {} } }),
+            ),
+            subagent_update(
+                "s1",
+                json!({ "sessionId": "sess_child_1", "state": { "state": "running" } }),
+            ),
+            // The child's own tool call reuses an id of the parent's.
+            update(
+                "sess_child_1",
+                json!({ "sessionUpdate": "tool_call", "toolCallId": "call_001", "title": "Run the integration tests",
+                    "kind": "execute", "status": "pending" }),
+            ),
+            json!({ "jsonrpc": "2.0", "id": 12, "method": "session/request_permission", "params": {
+                "sessionId": "sess_child_1", "toolCall": { "toolCallId": "call_001" },
+                "options": [
+                    { "optionId": "allow-once", "name": "Allow once", "kind": "allow_once" },
+                    { "optionId": "reject-once", "name": "Reject", "kind": "reject_once" } ] } }),
+        ],
+    );
+    let (kind, _, _) = started(&ev, "call_001");
+    assert_eq!(*kind, ItemKind::Subagent);
+    let (kind, parent, _) = started(&ev, "sess_child_1/call_001");
+    assert_eq!(*kind, ItemKind::CommandExecution);
+    assert_eq!(parent.as_deref(), Some("call_001"));
+    let ItemDetail::Subagent { child, status, .. } = last_detail(&ev, "call_001") else {
+        panic!("subagent")
+    };
+    assert_eq!(child.as_deref(), Some("sess_child_1"));
+    assert_eq!(status.as_deref(), Some("running"));
+    let asked = ev.iter().find_map(|e| match e {
+        Event::PermissionRequested { item_id, .. } => Some(item_id.clone()),
+        _ => None,
+    });
+    assert_eq!(asked, Some(Some("sess_child_1/call_001".to_owned())));
+
+    let ev = feed(
+        &mut d,
+        &[
+            update(
+                "sess_child_1",
+                json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call_001", "status": "completed" }),
+            ),
+            update(
+                "sess_child_1",
+                text_chunk("agent_message_chunk", "The temp path is wrong."),
+            ),
+            subagent_update(
+                "s1",
+                json!({ "sessionId": "sess_child_1", "state": { "state": "idle", "stopReason": "end_turn" } }),
+            ),
+            update(
+                "s1",
+                json!({ "sessionUpdate": "tool_call_update", "toolCallId": "call_001", "status": "completed",
+                    "content": [ { "type": "session", "sessionId": "sess_child_1" },
+                        { "type": "content", "content": { "type": "text", "text": "The temp path is wrong." } } ] }),
+            ),
+        ],
+    );
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::PermissionResolved { request_id } if request_id == "12"))
+    );
+    assert_eq!(
+        completed(&ev, "sess_child_1/call_001"),
+        Some(ItemStatus::Completed)
+    );
+    let message = ev.iter().find_map(|e| match e {
+        Event::ItemStarted {
+            kind: ItemKind::AgentMessage,
+            parent,
+            ..
+        } => Some(parent.clone()),
+        _ => None,
+    });
+    assert_eq!(message, Some(Some("call_001".to_owned())));
+    assert_eq!(completed(&ev, "call_001"), Some(ItemStatus::Completed));
+    let ItemDetail::Subagent {
+        agent,
+        output,
+        status,
+        ..
+    } = last_detail(&ev, "call_001")
+    else {
+        panic!("subagent")
+    };
+    assert_eq!(agent.as_deref(), Some("investigator"));
+    assert_eq!(status.as_deref(), Some("idle"));
+    assert_eq!(output.as_deref(), Some("The temp path is wrong."));
+}
+
+#[test]
+fn child_without_a_tool_call_follows_its_work_state() {
+    let mut d = ready_copilot();
+    let ev = feed(
+        &mut d,
+        &[
+            subagent_update(
+                "s1",
+                json!({ "sessionId": "sess_child_1", "title": "Test investigator",
+                    "description": "Investigates platform-specific test failures." }),
+            ),
+            update(
+                "sess_child_1",
+                json!({ "sessionUpdate": "session_message", "messageId": "msg_from_parent_1",
+                    "senderSessionId": "s1", "recipientSessionId": "sess_child_1", "senderMessageId": "msg_to_child_1",
+                    "content": [ { "type": "text", "text": "Find out why the integration tests fail on Windows." } ] }),
+            ),
+            subagent_update(
+                "s1",
+                json!({ "sessionId": "sess_child_1", "state": { "state": "running" } }),
+            ),
+            // Its own subagent nests under it.
+            subagent_update(
+                "sess_child_1",
+                json!({ "sessionId": "sess_grandchild", "title": "Log reader" }),
+            ),
+            // The report comes back to the parent, streamed.
+            update(
+                "s1",
+                json!({ "sessionUpdate": "session_message", "messageId": "report_1",
+                    "senderSessionId": "sess_child_1", "recipientSessionId": "s1" }),
+            ),
+            update(
+                "s1",
+                json!({ "sessionUpdate": "session_message_chunk", "messageId": "report_1",
+                    "content": { "type": "text", "text": "Tests fail " } }),
+            ),
+            update(
+                "s1",
+                json!({ "sessionUpdate": "session_message_chunk", "messageId": "report_1",
+                    "content": { "type": "text", "text": "on path length." } }),
+            ),
+        ],
+    );
+    let (kind, parent, _) = started(&ev, "subagent:sess_child_1");
+    assert_eq!((*kind, parent.as_deref()), (ItemKind::Subagent, None));
+    let (kind, parent, _) = started(&ev, "subagent:sess_grandchild");
+    assert_eq!(
+        (*kind, parent.as_deref()),
+        (ItemKind::Subagent, Some("subagent:sess_child_1"))
+    );
+    let ItemDetail::Subagent {
+        tool,
+        agent,
+        description,
+        prompt,
+        child,
+        status,
+        output,
+        ..
+    } = last_detail(&ev, "subagent:sess_child_1")
+    else {
+        panic!("subagent")
+    };
+    assert_eq!(tool, "subagent_update");
+    assert_eq!(agent.as_deref(), Some("Test investigator"));
+    assert_eq!(description, "Investigates platform-specific test failures.");
+    assert_eq!(
+        prompt.as_deref(),
+        Some("Find out why the integration tests fail on Windows.")
+    );
+    assert_eq!(child.as_deref(), Some("sess_child_1"));
+    assert_eq!(status.as_deref(), Some("running"));
+    assert_eq!(output.as_deref(), Some("Tests fail on path length."));
+    // Messages between sessions aren't the user's.
+    assert!(!ev.iter().any(|e| matches!(
+        e,
+        Event::ItemStarted {
+            kind: ItemKind::UserMessage,
+            ..
+        }
+    )));
+
+    // A failure ends the child's work, not the child.
+    let ev = feed(
+        &mut d,
+        &[subagent_update(
+            "s1",
+            json!({ "sessionId": "sess_child_1", "state": { "state": "idle", "stopReason": "error",
+                "error": { "code": -32000, "message": "Authentication required" } } }),
+        )],
+    );
+    assert_eq!(completed(&ev, "subagent:sess_child_1"), Some(ItemStatus::Failed));
+    let ItemDetail::Subagent { status, .. } = last_detail(&ev, "subagent:sess_child_1") else {
+        panic!("subagent")
+    };
+    assert_eq!(status.as_deref(), Some("error"));
+    assert!(
+        states(&ev).is_empty(),
+        "a child's state isn't the session's: {ev:#?}"
+    );
+
+    // More work for the same child starts its item again.
+    let ev = feed(
+        &mut d,
+        &[subagent_update(
+            "s1",
+            json!({ "sessionId": "sess_child_1", "state": { "state": "running" } }),
+        )],
+    );
+    let (kind, _, _) = started(&ev, "subagent:sess_child_1");
+    assert_eq!(*kind, ItemKind::Subagent);
+}
+
+#[test]
+fn session_message_without_known_participants_stays_native() {
+    let mut d = ready_copilot();
+    let ev = feed(
+        &mut d,
+        &[
+            subagent_update("s1", json!({ "sessionId": "sess_child_1" })),
+            update(
+                "sess_child_1",
+                json!({ "sessionUpdate": "session_message", "messageId": "m1",
+                    "content": [ { "type": "text", "text": "From somewhere" } ] }),
+            ),
+        ],
+    );
+    assert!(
+        ev.iter()
+            .any(|e| matches!(e, Event::Native { kind, .. } if kind == "session_message"))
+    );
+    let ItemDetail::Subagent { prompt, .. } = last_detail(&ev, "subagent:sess_child_1") else {
+        panic!("subagent")
+    };
+    assert_eq!(prompt, None);
+}
+
+#[test]
+fn updates_of_an_unannounced_session_are_ignored() {
+    let mut d = ready_copilot();
+    let ev = feed(
+        &mut d,
+        &[update("sess_other", text_chunk("agent_message_chunk", "hi"))],
+    );
+    assert!(
+        !ev.iter().any(|e| matches!(e, Event::ItemStarted { .. })),
+        "{ev:#?}"
+    );
+}
