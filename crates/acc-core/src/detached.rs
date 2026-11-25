@@ -27,6 +27,34 @@ use crate::shell::{LOGIN_PATH, join, quote};
 /// Root directory for detached sessions, relative to `$HOME`.
 pub const ROOT: &str = ".acc/s";
 
+/// pi extension that gives a session its MCP servers: pi (0.99 and later)
+/// reads no per-launch MCP config, but an extension can register servers
+/// for the running session only. A launch whose arguments name this path
+/// (`-e`, pi expands the `~/`) gets the file written by
+/// [`SessionDir::launch_script_with_spec`], and the servers in
+/// [`PI_MCP_ENV`].
+pub const PI_MCP_EXTENSION: &str = "~/.acc/pi/session-mcp.ts";
+
+/// Environment variable holding the session's servers for
+/// [`PI_MCP_EXTENSION`]: a JSON object of `mcp.json` `mcpServers` entries.
+pub const PI_MCP_ENV: &str = "ACC_MCP_SERVERS";
+
+/// The source of [`PI_MCP_EXTENSION`]. Servers are `direct`, so their
+/// tools are declared to the model like built-in ones. On a pi without
+/// MCP the extension fails to load, which pi reports.
+pub const PI_MCP_EXTENSION_SOURCE: &str = r#"// Written by ACC: registers this session's MCP servers ($ACC_MCP_SERVERS).
+export default function (pi) {
+  const raw = process.env.ACC_MCP_SERVERS;
+  if (!raw) return;
+  if (typeof pi.registerMcpServer !== "function") {
+    throw new Error("this pi has no MCP support; session MCP servers need pi 0.99 or later");
+  }
+  for (const [name, config] of Object.entries(JSON.parse(raw))) {
+    pi.registerMcpServer(name, { exposure: "direct", ...config });
+  }
+}
+"#;
+
 /// Exit code of [`SessionDir::attach_script`], [`SessionDir::input_script`],
 /// [`SessionDir::write_script`] and [`SessionDir::stop_script`] when the
 /// session has no running harness.
@@ -136,6 +164,17 @@ impl SessionDir {
         let write_spec = spec_json
             .map(|j| format!("printf '%s\\n' {} >\"$d/spec.json\"\n", quote(j.trim())))
             .unwrap_or_default();
+        // Shared by every session, so written whole and moved into place.
+        let write_extension = if spec.args.iter().any(|a| a == PI_MCP_EXTENSION) {
+            let path = quote_path(PI_MCP_EXTENSION);
+            format!(
+                "mkdir -p {dir}\nprintf '%s' {src} >{path}.$$\nmv -f {path}.$$ {path}\n",
+                dir = quote_path(PI_MCP_EXTENSION.rsplit_once('/').map_or("~", |(d, _)| d)),
+                src = quote(PI_MCP_EXTENSION_SOURCE),
+            )
+        } else {
+            String::new()
+        };
         // Waits for the PID, but gives up on a recorded exit (the wrapper
         // could not start the harness) or after `LAUNCH_WAIT_TICKS` ticks, so a
         // bad directory or a dead shell fails the launch rather than hanging it.
@@ -154,6 +193,7 @@ impl SessionDir {
              : >>\"$d/out.ndjson\"\n\
              acc_l=$(wc -c <\"$d/out.ndjson\" | tr -d ' ')\n\
              {write_spec}\
+             {write_extension}\
              nohup sh -c {wrapper} \"$d\" </dev/null >/dev/null 2>&1 &\n\
              i=0\n\
              while [ ! -s \"$d/pid\" ]; do\n\
@@ -977,6 +1017,30 @@ mod sh_tests {
         assert!(reason.contains("no user namespaces"), "{reason}");
         let _ = std::fs::remove_dir_all(&home);
         let _ = std::fs::remove_dir_all(&fakes);
+    }
+
+    #[test]
+    fn a_launch_naming_the_pi_extension_writes_it() {
+        let home = std::env::temp_dir().join(format!("acc-test-pimcp-{}", std::process::id()));
+        std::fs::create_dir_all(&home).expect("mkdir");
+        let dir = SessionDir::new("pimcp").expect("valid id");
+        let spec = |args: Vec<String>| LaunchSpec {
+            program: "true".into(),
+            args,
+            env: vec![],
+            protocol: Protocol::PiRpc,
+            sandbox: None,
+        };
+        let file = home.join(".acc/pi/session-mcp.ts");
+        sh(&home, &dir.launch_script(&spec(vec![]), "/"), b"");
+        assert!(!file.exists(), "only a launch that names it");
+        let args = vec!["-e".into(), PI_MCP_EXTENSION.into()];
+        for _ in 0..2 {
+            sh(&home, &dir.launch_script(&spec(args.clone()), "/"), b"");
+            let text = std::fs::read_to_string(&file).expect("written");
+            assert_eq!(text, PI_MCP_EXTENSION_SOURCE);
+        }
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
