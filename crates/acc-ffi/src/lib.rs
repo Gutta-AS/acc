@@ -271,6 +271,24 @@ impl Session {
         Ok(lock(&self.inner).send(command.into())?)
     }
 
+    /// When to call `tick` next (milliseconds since the Unix epoch), or
+    /// null while nothing waits for the harness to fall silent. Ask again
+    /// after every `receive` and `send`.
+    pub fn next_tick_ms(&self) -> Option<u64> {
+        lock(&self.inner).next_tick_ms()
+    }
+
+    /// Acts on the time: once the harness has been silent long enough,
+    /// returns what that means, such as a turn that background work woke
+    /// (with no prompt to reply to) completing. Cheap to call early.
+    pub fn tick(&self, now_ms: u64) -> Vec<Event> {
+        lock(&self.inner)
+            .tick(now_ms)
+            .into_iter()
+            .map(Event::from)
+            .collect()
+    }
+
     /// The harness process ended; returns the events to show for it.
     pub fn exited(&self, code: Option<i32>, now_ms: u64) -> Vec<Event> {
         lock(&self.inner)

@@ -89,6 +89,8 @@ pub struct Session {
     start_model: Option<String>,
     /// Every item the events so far described.
     transcript: Transcript,
+    /// When the harness last sent output, for [`Session::tick`].
+    last_output_ms: Option<u64>,
 }
 
 impl Session {
@@ -160,6 +162,7 @@ impl Session {
             launch,
             start_model,
             transcript: Transcript::new(),
+            last_output_ms: None,
         }
     }
 
@@ -197,6 +200,9 @@ impl Session {
     /// Feeds harness output. `now_ms` (milliseconds since the Unix epoch)
     /// stamps state changes, since the core has no clock.
     pub fn receive(&mut self, bytes: &[u8], now_ms: u64) -> Received {
+        if !bytes.is_empty() {
+            self.last_output_ms = Some(now_ms);
+        }
         let d = self.driver.get_mut();
         let got = d.on_output(bytes);
         let transmit = d.poll_transmit();
@@ -206,6 +212,33 @@ impl Session {
             self.follow(event, &mut events);
         }
         Received { events, transmit }
+    }
+
+    /// When to call [`Session::tick`] next (milliseconds since the Unix
+    /// epoch): the driver waits for the harness to fall silent, such as to
+    /// end a turn background work woke without a prompt. `None` while
+    /// nothing waits; ask again after every [`Session::receive`] and
+    /// [`Session::send`].
+    pub fn next_tick_ms(&self) -> Option<u64> {
+        let quiet = self.driver.get().quiet_after_ms()?;
+        Some(self.last_output_ms?.saturating_add(quiet))
+    }
+
+    /// Lets the session act on the time: once the harness has been silent
+    /// long enough (see [`Session::next_tick_ms`]), returns what that
+    /// silence means, such as the woken turn completing. Cheap; calling it
+    /// early or when nothing waits returns nothing.
+    pub fn tick(&mut self, now_ms: u64) -> Vec<Event> {
+        if self.next_tick_ms().is_none_or(|at| now_ms < at) {
+            return Vec::new();
+        }
+        let got = self.driver.get_mut().on_quiet();
+        let mut events = Vec::with_capacity(got.len());
+        for mut event in got {
+            self.note(&mut event, now_ms);
+            self.follow(event, &mut events);
+        }
+        events
     }
 
     /// Turns a command into bytes to write to the harness.

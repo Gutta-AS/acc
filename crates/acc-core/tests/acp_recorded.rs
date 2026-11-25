@@ -380,3 +380,123 @@ fn opencode_subagent_and_its_child_session() {
             .all(|i| i.status != acc_core::transcript::ItemStatus::Running)
     );
 }
+
+/// opencode 2.3.2 against a real model: the prompt starts a `background:
+/// true` shell and a background `subagent`, then the turn the subagent's
+/// report wakes runs inside the prompt; after `end_turn` the finished shell
+/// wakes another turn that asks for a permission and answers, and nothing
+/// more arrives (the recording waited two minutes). Paths and request-id
+/// tags normalized, model and command lists cut down.
+const OPENCODE_BACKGROUND_OUT: &str = include_str!("fixtures/acp/opencode-2.3.2-background.out.ndjson");
+const OPENCODE_BACKGROUND_IN: &str = include_str!("fixtures/acp/opencode-2.3.2-background.in.ndjson");
+const OPENCODE_BACKGROUND_PROMPT: &str = "Do two things, then reply \"started\" and end your turn right away without waiting: (1) use the bash tool with background: true to run `sleep 20 && echo acc-bg-done`; (2) start one explore subagent that reads README.md and reports its first line. Do not wait for, poll or check on either. Later, each time you are woken (by the shell finishing or by the subagent report), run `echo acc-woken` with bash in the foreground, then reply with one short line.";
+
+#[test]
+fn opencode_turn_woken_after_end_turn_ends_with_silence() {
+    use acc_core::acp::WOKEN_TURN_QUIET_MS as QUIET_MS;
+    use acc_core::item::ItemDetail;
+    use acc_core::live::{Session, SessionConfig};
+    use acc_core::transcript::{ItemStatus, Transcript};
+
+    let mut cfg = SessionConfig::new(Harness::Opencode, "/home/v/proj");
+    cfg.model = Some("opencode/deepseek-v4.1-flash-free".into());
+    let mut s = Session::new(cfg);
+    let mut written = s.start();
+    let mut events = Vec::new();
+    let mut now = 1_000;
+    for line in OPENCODE_BACKGROUND_OUT.split_inclusive('\n') {
+        now += 10;
+        let got = s.receive(line.as_bytes(), now);
+        written.extend(got.transmit);
+        for ev in got.events {
+            match &ev {
+                Event::SessionStarted { .. } => {
+                    written.extend(s.send(Command::prompt(OPENCODE_BACKGROUND_PROMPT)).unwrap());
+                }
+                Event::PermissionRequested { request_id, .. } => {
+                    assert_eq!(s.next_tick_ms(), None, "a pending permission isn't silence");
+                    written.extend(
+                        s.send(Command::AnswerPermission {
+                            request_id: request_id.clone(),
+                            option_id: "once".into(),
+                        })
+                        .unwrap(),
+                    );
+                    // The answer is the agent's to act on: no silence yet.
+                    assert_eq!(s.next_tick_ms(), None);
+                }
+                _ => {}
+            }
+            events.push(ev);
+        }
+    }
+    assert_eq!(
+        json_lines(&String::from_utf8(written).unwrap()),
+        json_lines(OPENCODE_BACKGROUND_IN),
+        "ACC wrote what the recording client did"
+    );
+
+    // The prompt's turn ends while the subagent's item still runs; the
+    // shell's turn after it reaches Blocked on its permission request.
+    let end = events
+        .iter()
+        .position(|e| matches!(e, Event::TurnCompleted))
+        .unwrap();
+    assert_eq!(states(&events[..end]).last(), Some(&RunState::Waiting));
+    assert_eq!(
+        states(&events[end..]),
+        vec![
+            RunState::Working { progress: None },
+            RunState::Blocked {
+                kind: BlockKind::Permission
+            },
+            RunState::Working { progress: None },
+        ]
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::TurnCompleted))
+            .count(),
+        1
+    );
+
+    // Nothing ends the woken turn but silence.
+    let last = now;
+    assert_eq!(s.next_tick_ms(), Some(last + QUIET_MS));
+    assert!(s.tick(last + QUIET_MS - 1).is_empty());
+    let quiet = s.tick(last + QUIET_MS);
+    assert_eq!(states(&quiet), vec![RunState::Done]);
+    assert!(matches!(quiet.last(), Some(Event::TurnCompleted)));
+    assert_eq!(s.next_tick_ms(), None);
+    assert!(s.tick(last + 10 * QUIET_MS).is_empty());
+
+    let mut t = Transcript::new();
+    for e in events.iter().chain(&quiet) {
+        t.settle(e);
+        t.apply(e);
+    }
+    let subs: Vec<_> = t.subagents().collect();
+    assert_eq!(subs.len(), 1);
+    let ItemDetail::Subagent {
+        agent, child, output, ..
+    } = subs[0].detail.clone()
+    else {
+        panic!("subagent detail")
+    };
+    assert_eq!(agent.as_deref(), Some("explore"));
+    assert_eq!(child.as_deref(), Some("ses_deff84e1cffeX5FRxvs1Mncl8D"));
+    // The child's last message is the report, not the launch notice.
+    assert_eq!(
+        output.as_deref(),
+        Some("The first line of `/home/v/proj/README.md` is:\n\n`# demo`")
+    );
+    // The child's read and its message are under the subagent, not native.
+    let children: Vec<_> = t.children(&subs[0].id).map(|i| i.kind).collect();
+    assert_eq!(children, vec![ItemKind::ToolCall, ItemKind::AgentMessage]);
+    assert!(t.items().iter().all(|i| i.status != ItemStatus::Running));
+    assert!(
+        t.top_level()
+            .any(|i| i.text == "Background shell finished: acc-bg-done.")
+    );
+}

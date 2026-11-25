@@ -543,6 +543,22 @@ impl Session {
         self.inner.send(cmd).map_err(|e| JsError::new(&e.to_string()))
     }
 
+    /// When to call `tick` next (`Date.now()` time), or undefined while
+    /// nothing waits for the harness to fall silent. Ask again after every
+    /// `receive` and `send`.
+    #[wasm_bindgen(js_name = nextTickMs)]
+    pub fn next_tick_ms(&self) -> Option<f64> {
+        self.inner.next_tick_ms().map(|t| t as f64)
+    }
+
+    /// Acts on the time: once the harness has been silent long enough,
+    /// returns what that means, such as a turn that background work woke
+    /// (with no prompt to reply to) completing. Cheap to call early.
+    #[wasm_bindgen(unchecked_return_type = "Event[]")]
+    pub fn tick(&mut self, now_ms: f64) -> Result<JsValue, JsError> {
+        to_js(&self.inner.tick(ms(now_ms)))
+    }
+
     /// The harness process ended; returns the events to show for it.
     #[wasm_bindgen(unchecked_return_type = "Event[]")]
     pub fn exited(&mut self, code: Option<i32>, now_ms: f64) -> Result<JsValue, JsError> {

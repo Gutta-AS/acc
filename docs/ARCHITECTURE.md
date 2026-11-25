@@ -140,6 +140,20 @@ above): Copilot keeps background work running and Antigravity stops it. Tool cal
 are closed with it, and their later `tool_call_update`s update the item (and complete it again when final)
 without moving the `RunState` back to `Working`.
 
+**Woken turns.** opencode 2.3.1+ and Antigravity 1.5.10+ run a turn on their own when a background
+shell, task or subagent finishes after `session/prompt` has replied (opencode also moves a shell to
+the background when its timeout runs out). The turn streams as ordinary `session/update`s, and its
+permission requests reach `Blocked` as usual, but nothing ends it: no reply, no usage, no update (a
+recorded opencode 2.3.2 session sent nothing for two minutes after one). Antigravity 1.5.15 keeps the
+prompt open across wake-ups instead, except for daemon tasks such as dev servers. So a turn that no
+prompt of this client's is waiting on ends with silence: once the agent has sent nothing for
+`acp::WOKEN_TURN_QUIET_MS` (30 s) while no permission or question is pending, no tool call runs and
+the agent has spoken since the last command, `Driver::on_quiet` completes it (`Done`,
+`TurnCompleted`). A turn that goes on after all simply starts again. Drivers have no clock, so the
+session layers measure the silence: `next_tick_ms()` says when to call `tick(now_ms)` (see
+[Bindings](#bindings)). A turn another client prompted looks the same from here and ends the same
+way; its late reply doesn't end it twice.
+
 ## Items
 
 Every harness reports the same kinds of items (messages, reasoning, tool calls, commands, file
@@ -219,8 +233,14 @@ sans-IO, so the app owns the transport:
 spawn launch_spec() on the host  →  write start()
 for each chunk read:  receive(bytes, now_ms) → { events, transmit }  →  write transmit
 for each UI action:   send(command) → bytes  →  write them
+when next_tick_ms():  tick(now_ms) → events   (ask again after every receive and send)
 on EOF:               exited(code, now_ms)
 ```
+
+`next_tick_ms()` is `None` unless the driver waits for the harness to fall silent (an ACP turn that
+background work woke, see **Woken turns**); `AccSession` has the same pair for the detached layer,
+and `acc-ssh`'s `RemoteSession::next_events` (so `acc-node` and the FFI's SSH transport) and `acc run`
+tick by themselves.
 
 | Binding | Crate | Types |
 |---|---|---|
@@ -538,8 +558,13 @@ early. When its report will start another turn on its own, the session meanwhile
 new turn, so it goes back to `Working` when the last one finishes) and pi (pi-subagents' `async: true`
 runs, by `details.asyncId`, until their `subagent-notify`). Codex queues a finished child's
 `<subagent_notification>` for the parent without starting a turn, so its turn is simply done.
-opencode and Copilot keep the ACP `session/prompt` open until the background agent has reported
-back and the follow-up is answered, so they stay `Working`.
+Copilot keeps the ACP `session/prompt` open until the background agent has reported
+back and the follow-up is answered, so it stays `Working`. opencode 2.3 returns the `subagent` call at
+once with `rawOutput.metadata.status: "running"` and the child's session id: the item stays `Running`
+(`background`), the child's updates that follow go under it, and the prompt's turn ends `Waiting`.
+Nothing says when the child is done, so the item completes, with the child's last message as its
+report, once the agent has been silent for `acp::WOKEN_TURN_QUIET_MS`, like a woken turn (see
+**Woken turns**); the turn the report wakes is one of those.
 
 | Harness | How a subagent shows up | Child conversation |
 |---|---|---|

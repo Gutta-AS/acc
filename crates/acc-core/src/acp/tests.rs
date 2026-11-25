@@ -2062,6 +2062,194 @@ fn background_work_reporting_after_a_cancel_does_not_resume_the_run() {
     assert!(!events.iter().any(|e| matches!(e, Event::ItemStarted { .. })));
 }
 
+/// Antigravity 1.5.10 and opencode 2.3: a turn the agent starts on its own
+/// after `session/prompt` replied (background work woke it) gets no reply,
+/// so it ends once the agent is silent with nothing running or pending.
+#[test]
+fn a_woken_turn_ends_with_silence_once_nothing_runs() {
+    let mut d = ready_copilot();
+    let prompt = one(&d
+        .command(Command::prompt("start it in the background"))
+        .expect("prompt"));
+    assert_eq!(d.quiet_after_ms(), None, "a prompt's turn has its reply");
+    feed(
+        &mut d,
+        &[result(prompt["id"].clone(), json!({ "stopReason": "end_turn" }))],
+    );
+    assert_eq!(d.quiet_after_ms(), None, "nothing to end");
+    assert!(d.on_quiet().is_empty());
+
+    // Woken: a tool call that asks first.
+    let events = feed(
+        &mut d,
+        &[
+            update("s1", text_chunk("agent_message_chunk", "It finished; checking.")),
+            update(
+                "s1",
+                json!({ "sessionUpdate": "tool_call", "toolCallId": "t1", "title": "cat out.log",
+                        "kind": "execute", "status": "pending", "rawInput": { "command": "cat out.log" } }),
+            ),
+            json!({ "jsonrpc": "2.0", "id": 7, "method": "session/request_permission", "params": {
+                "sessionId": "s1", "toolCall": { "toolCallId": "t1" },
+                "options": [{ "optionId": "allow", "name": "Allow", "kind": "allow_once" }] } }),
+        ],
+    );
+    assert_eq!(
+        states(&events),
+        [
+            working(),
+            RunState::Blocked {
+                kind: BlockKind::Permission
+            }
+        ]
+    );
+    assert_eq!(d.quiet_after_ms(), None, "waiting on the user");
+    let answer = d.command(Command::AnswerPermission {
+        request_id: "7".into(),
+        option_id: "allow".into(),
+    });
+    assert!(!answer.expect("answer").is_empty());
+    assert_eq!(d.quiet_after_ms(), None, "the agent has the answer");
+    feed(
+        &mut d,
+        &[update(
+            "s1",
+            json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "in_progress" }),
+        )],
+    );
+    assert_eq!(d.quiet_after_ms(), None, "a tool call is running");
+    assert!(d.on_quiet().is_empty());
+    feed(
+        &mut d,
+        &[
+            update(
+                "s1",
+                json!({ "sessionUpdate": "tool_call_update", "toolCallId": "t1", "status": "completed" }),
+            ),
+            update("s1", text_chunk("agent_message_chunk", "All good.")),
+        ],
+    );
+    assert_eq!(d.quiet_after_ms(), Some(WOKEN_TURN_QUIET_MS));
+    let events = d.on_quiet();
+    assert_eq!(states(&events), [RunState::Done]);
+    assert!(matches!(events.last(), Some(Event::TurnCompleted)));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::ItemCompleted {
+            status: ItemStatus::Completed,
+            ..
+        }
+    )));
+    assert_eq!(d.quiet_after_ms(), None);
+
+    // A reply that ends it after all (another client's prompt) is no second end.
+    let events = feed(&mut d, &[result("other-9", json!({ "stopReason": "end_turn" }))]);
+    assert!(events.is_empty(), "{events:?}");
+
+    // Another wake opens a new turn, which silence ends again.
+    let events = feed(
+        &mut d,
+        &[update("s1", text_chunk("agent_message_chunk", "Again."))],
+    );
+    assert_eq!(states(&events), [working()]);
+    assert_eq!(d.quiet_after_ms(), Some(WOKEN_TURN_QUIET_MS));
+}
+
+/// opencode 2.3 runs subagents in the background: the call returns at once
+/// with `status: "running"`, the child streams afterwards, and the turn
+/// that started it ends before the child reports.
+#[test]
+fn an_opencode_background_subagent_runs_until_its_child_goes_quiet() {
+    let mut d = ready_copilot();
+    let prompt = one(&d
+        .command(Command::prompt("explore in the background"))
+        .expect("prompt"));
+    let child_meta = json!({ "opencode/child-session": { "id": "ses_child", "parentID": "s1" } });
+    let events = feed(
+        &mut d,
+        &[
+            update(
+                "s1",
+                json!({ "sessionUpdate": "tool_call", "toolCallId": "sub1", "name": "subagent",
+                        "title": "subagent", "kind": "think", "status": "pending", "rawInput": {} }),
+            ),
+            update(
+                "s1",
+                json!({ "sessionUpdate": "tool_call_update", "toolCallId": "sub1", "status": "in_progress",
+                        "rawInput": { "agent": "explore", "description": "Look around", "prompt": "List files" } }),
+            ),
+            update(
+                "s1",
+                json!({ "sessionUpdate": "tool_call_update", "toolCallId": "sub1", "status": "completed",
+                        "content": [{ "type": "content", "content": { "type": "text",
+                            "text": "The subagent is working in the background (sessionID: ses_child)." } }],
+                        "rawOutput": { "metadata": { "sessionID": "ses_child", "status": "running" } } }),
+            ),
+            update("s1", text_chunk("agent_message_chunk", "started")),
+            result(prompt["id"].clone(), json!({ "stopReason": "end_turn" })),
+        ],
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, Event::ItemCompleted { id, .. } if id == "sub1"))
+    );
+    assert_eq!(states(&events).last(), Some(&RunState::Waiting));
+    let running = events
+        .iter()
+        .rev()
+        .find_map(|e| match e {
+            Event::ItemUpdated { id, detail, .. } if id == "sub1" => Some(detail.clone()),
+            _ => None,
+        })
+        .expect("subagent updated");
+    let ItemDetail::Subagent {
+        background,
+        output,
+        child,
+        ..
+    } = running
+    else {
+        panic!("subagent")
+    };
+    assert!(background);
+    assert_eq!(output, None, "the launch notice is no report");
+    assert_eq!(child.as_deref(), Some("ses_child"));
+
+    // The child works on after the turn: under its subagent, without
+    // opening a turn of the parent's.
+    let mut chunk = text_chunk("agent_message_chunk", "Found ");
+    chunk["_meta"] = child_meta.clone();
+    let mut more = text_chunk("agent_message_chunk", "two files.");
+    more["_meta"] = child_meta;
+    let events = feed(&mut d, &[update("s1", chunk), update("s1", more)]);
+    assert!(states(&events).is_empty(), "{events:?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, Event::ItemStarted { parent: Some(p), .. } if p == "sub1"))
+    );
+    assert_eq!(d.quiet_after_ms(), Some(WOKEN_TURN_QUIET_MS));
+
+    // Quiet: the child is done, its last message the report.
+    let events = d.on_quiet();
+    assert_eq!(states(&events), [RunState::Done]);
+    assert!(!events.iter().any(|e| matches!(e, Event::TurnCompleted)));
+    let done = events
+        .iter()
+        .find_map(|e| match e {
+            Event::ItemCompleted { id, detail, .. } if id == "sub1" => Some(detail.clone()),
+            _ => None,
+        })
+        .expect("subagent completed");
+    let ItemDetail::Subagent { output, status, .. } = done else {
+        panic!("subagent detail")
+    };
+    assert_eq!(output.as_deref(), Some("Found two files."));
+    assert_eq!(status.as_deref(), Some("completed"));
+    assert_eq!(d.quiet_after_ms(), None);
+}
+
 /// An opencode 2.2.7 driver with a session open; its `initialize` result
 /// advertises steering in the top-level `_meta`, beside `agentCapabilities`.
 fn ready_steerable(meta: Value) -> AcpDriver {

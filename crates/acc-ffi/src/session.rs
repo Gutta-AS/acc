@@ -204,6 +204,20 @@ impl AccSession {
         self.convert(lock(&self.inner).take_updates(now_ms))
     }
 
+    /// When to call `tick` next (milliseconds since the Unix epoch), or
+    /// null while nothing waits for the log to fall silent. Ask again after
+    /// every `feed` and `command`.
+    pub fn next_tick_ms(&self) -> Option<u64> {
+        lock(&self.inner).next_tick_ms()
+    }
+
+    /// Acts on the time: once the log has been silent long enough, returns
+    /// what that means, such as a turn that background work woke (with no
+    /// prompt to reply to) completing. Cheap to call early.
+    pub fn tick(&self, now_ms: u64) -> Vec<AccUpdate> {
+        self.convert(lock(&self.inner).tick(now_ms))
+    }
+
     /// Also give every update its event as JSON, the line `acc run --json`
     /// would print, in `AccUpdate::event_json`. Off by default, so clients
     /// that don't read it don't pay for it. For libraries that read ACC's

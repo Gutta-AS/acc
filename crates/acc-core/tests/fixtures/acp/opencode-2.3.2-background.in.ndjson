@@ -1,0 +1,8 @@
+{"id":"acc-0","jsonrpc":"2.0","method":"initialize","params":{"clientCapabilities":{"elicitation":{"form":{}},"fs":{"readTextFile":false,"writeTextFile":false},"session":{"compaction":{},"configOptions":{"boolean":{}}},"subagents":{},"terminal":false},"clientInfo":{"name":"acc","title":"Agent Control Core","version":"0.5.0"},"protocolVersion":1}}
+{"id":"acc-1","jsonrpc":"2.0","method":"session/new","params":{"cwd":"/home/v/proj","mcpServers":[]}}
+{"id":"acc-2","jsonrpc":"2.0","method":"session/set_config_option","params":{"configId":"model","sessionId":"ses_deff87ef3ffeb7L0jl78U7RBLz","value":"opencode/deepseek-v4.1-flash-free"}}
+{"id":"acc-3","jsonrpc":"2.0","method":"session/prompt","params":{"prompt":[{"text":"Do two things, then reply \"started\" and end your turn right away without waiting: (1) use the bash tool with background: true to run `sleep 20 && echo acc-bg-done`; (2) start one explore subagent that reads README.md and reports its first line. Do not wait for, poll or check on either. Later, each time you are woken (by the shell finishing or by the subagent report), run `echo acc-woken` with bash in the foreground, then reply with one short line.","type":"text"}],"sessionId":"ses_deff87ef3ffeb7L0jl78U7RBLz"}}
+{"id":0,"jsonrpc":"2.0","result":{"outcome":{"optionId":"once","outcome":"selected"}}}
+{"id":1,"jsonrpc":"2.0","result":{"outcome":{"optionId":"once","outcome":"selected"}}}
+{"id":"acc-4","jsonrpc":"2.0","method":"session/list","params":{"cwd":"/home/v/proj"}}
+{"id":2,"jsonrpc":"2.0","result":{"outcome":{"optionId":"once","outcome":"selected"}}}
