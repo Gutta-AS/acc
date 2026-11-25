@@ -1,6 +1,6 @@
 # Recorded harness sessions
 
-Real stdout captured from the harnesses on 2026-10-10 (2026-10-12 for the subagent recordings, 2026-10-13 for the background-agent one, 2026-10-14 for Cursor and the Codex subagent, 2026-11-02 for the Claude fork, 2026-11-14 for Cursor 2026.11.05),
+Real stdout captured from the harnesses on 2026-10-10 (2026-10-12 for the subagent recordings, 2026-10-13 for the background-agent one, 2026-10-14 for Cursor and the Codex subagent, 2026-11-02 for the Claude fork, 2026-11-14 for Cursor 2026.11.05, 2026-11-25 for opencode 2.3.2),
 replayed by the driver tests.
 
 | File | Harness | What it covers |
@@ -16,6 +16,7 @@ replayed by the driver tests.
 | `acp/cursor-2026.11.05.{in,out}.ndjson` | Cursor Agent 2026.11.05 | `acc acp cursor`, two turns: `Run echo acc-live-test` (skill reads, the shell call approved with `allow-once`, `session_info_update` title), then a prompt asking for a subagent: a `Task` tool call (`rawInput._toolName: "task"`) plus a `cursor/task` request that ACC answers with `-32601`. Cursor has no rename request; its only rename is the title update |
 | `codex/subagent-0.162.1.ndjson` | codex-cli 0.162.1 | `acc run codex`: the parent spawns one subagent (`subAgentActivity` `started`), waits for it (`collabAgentToolCall` `wait`), the child's reply streams on its own thread, `subAgentActivity` `completed`, then the parent's answer |
 | `acp/opencode-2.0.14-subagent.{in,out}.ndjson` | opencode 2.0.14 | a `subagent` tool call to `explore`, whose child session streams under the parent's session id tagged `_meta["opencode/child-session"]` |
+| `acp/opencode-2.3.2-background.{in,out}.ndjson` | opencode 2.3.2 | `acc run opencode --model opencode/deepseek-v4.1-flash-free` (recorded 2026-11-25): a `background: true` shell and a background `subagent` (its call completes at once with `rawOutput.metadata.status: "running"`, then the child streams), the turn the child's report wakes inside the prompt, then after `end_turn` the turn the finished shell wakes, with a permission request answered `once`. Nothing followed for two minutes: no reply, usage or update ends that turn |
 
 Edits made when recording: home paths and the Claude session id were replaced, very long lists
 (tools, commands, skills, models, context grid) were cut down (Cursor's commands and models to its own, without the recording machine's skills), environment-specific bookkeeping

@@ -70,6 +70,12 @@ const MAX_EARLY: usize = 1024;
 const AUTH_REQUIRED: i64 = -32000;
 /// How opencode titles a session it hasn't named yet (`New session - <ISO time>`).
 const PLACEHOLDER_TITLE: &str = "New session - ";
+/// How long the agent has to stay silent before a turn it started on its
+/// own counts as finished. opencode 2.3 and Antigravity 1.5.10 run a turn
+/// when a background shell, task or subagent wakes them after
+/// `session/prompt` replied, and nothing ends that turn: no reply, no
+/// usage, no update. A turn that turns out to go on just starts again.
+pub const WOKEN_TURN_QUIET_MS: u64 = 30_000;
 
 /// How the driver gets a session once the agent is up.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -210,6 +216,19 @@ struct ChildSession {
     record: Value,
 }
 
+/// A subagent that runs on in the background after its tool call returned
+/// (opencode 2.3: `rawOutput.metadata.status` is `running`), until its
+/// child session goes quiet.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+struct BackgroundRun {
+    /// The tool call's last `rawOutput`, completed with another status.
+    raw_output: Value,
+    /// The child's latest message so far: its report once it stops.
+    report: String,
+    /// The child's message `report` comes from.
+    message: Option<ItemId>,
+}
+
 /// A session-directed message, as far as it has been reported.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 struct SessionMessage {
@@ -312,8 +331,24 @@ pub struct AcpDriver {
     history: Vec<String>,
     history_next: usize,
     turn_open: bool,
+    /// Background subagent tool calls (see [`BackgroundRun`]) by item id.
+    #[serde(default)]
+    background_runs: BTreeMap<ItemId, BackgroundRun>,
+    /// The last turn was ended by silence ([`Driver::on_quiet`]); a late
+    /// reply to another client's prompt for it doesn't end it again.
+    #[serde(default)]
+    quiet_ended: bool,
+    /// The agent sent something since the last command. Until it has, a
+    /// command such as a permission answer may still be in its hands, so
+    /// silence doesn't end the turn.
+    #[serde(default = "yes")]
+    heard: bool,
 
     state: Option<(RunState, Option<String>)>,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl AcpDriver {
@@ -371,6 +406,9 @@ impl AcpDriver {
             history: Vec::new(),
             history_next: 0,
             turn_open: false,
+            background_runs: BTreeMap::new(),
+            quiet_ended: false,
+            heard: true,
             state: None,
         };
         d.rebuild_commands();
@@ -557,6 +595,7 @@ impl AcpDriver {
         self.echoed_turns += 1;
         self.history_next += 1;
         self.turn_open = true;
+        self.quiet_ended = false;
         push_prompt(
             &mut self.items,
             format!("prompt-{}", self.echo_seq),
@@ -572,6 +611,7 @@ impl AcpDriver {
             return;
         }
         self.turn_open = true;
+        self.quiet_ended = false;
         let n = self.history_next;
         self.history_next += 1;
         if let Some(text) = self.history.get(n).cloned() {
@@ -913,6 +953,7 @@ impl AcpDriver {
         self.child_open.clear();
         self.subagents.clear();
         self.session_messages.clear();
+        self.background_runs.clear();
         self.harness_commands.clear();
         self.rebuild_commands();
         self.history.clear();
@@ -952,6 +993,8 @@ impl AcpDriver {
         }
         let stop = r.get("stopReason").and_then(Value::as_str).unwrap_or("end_turn");
         let (state, message) = match stop {
+            // A background subagent reports back by waking the agent.
+            "end_turn" if !self.background_runs.is_empty() => (RunState::Waiting, None),
             "end_turn" => (RunState::Done, None),
             "cancelled" => (RunState::Idle, None),
             // The turn failed after the prompt was taken (schema 1.25),
@@ -1007,6 +1050,10 @@ impl AcpDriver {
         if r.get("agentCapabilities").is_some() {
             self.absorb_capabilities(r);
         } else if r.get("stopReason").is_some() {
+            if std::mem::take(&mut self.quiet_ended) && !self.turn_open {
+                // Silence already ended this turn.
+                return;
+            }
             self.on_turn_end(r, out);
         } else if r.get("sessions").is_some() {
             self.listed_sessions(r, out);
@@ -1528,7 +1575,10 @@ impl AcpDriver {
             out.push(native(kind, update));
             return;
         };
-        if !self.replaying {
+        if self.background_runs.contains_key(&parent) {
+            // A background subagent works on after the turn that started it.
+            self.child_activity(out);
+        } else if !self.replaying {
             self.working(out);
         }
         self.child_update(&child, parent, false, kind, update, out);
@@ -1587,6 +1637,15 @@ impl AcpDriver {
                 let content = update.get("content").unwrap_or(&Value::Null);
                 match content.get("text").and_then(Value::as_str) {
                     Some(text) if content.get("type").and_then(Value::as_str) == Some("text") => {
+                        if item_kind == ItemKind::AgentMessage
+                            && let Some(run) = self.background_runs.get_mut(&parent)
+                        {
+                            if run.message.as_ref() != Some(id) {
+                                run.message = Some(id.clone());
+                                run.report.clear();
+                            }
+                            run.report.push_str(text);
+                        }
                         self.items.delta(id.clone(), text.to_owned(), out);
                     }
                     _ => self.items.update(id.clone(), content.clone(), out),
@@ -1645,7 +1704,12 @@ impl AcpDriver {
         if self.turn_open {
             self.working(out);
         } else if matches!(self.state, Some((RunState::Blocked { .. }, _))) && self.permissions.is_empty() {
-            self.set_state(RunState::Idle, None, out);
+            let rest = if self.background_runs.is_empty() {
+                RunState::Idle
+            } else {
+                RunState::Waiting
+            };
+            self.set_state(rest, None, out);
         }
     }
 
@@ -1920,6 +1984,9 @@ impl AcpDriver {
 
     fn finish_tool_if_done(&mut self, id: &str, update: &Value, out: &mut Vec<Event>) {
         if is_final(update) && self.open_tools.remove(id) {
+            if self.subagent_tools.contains(id) && runs_in_background(update) {
+                return self.run_in_background(id, update, out);
+            }
             // A finished subagent: its child session's last message is done.
             let children: Vec<String> = self
                 .child_sessions
@@ -1932,6 +1999,59 @@ impl AcpDriver {
             }
             self.unclaimed_subagents.retain(|(t, _)| t != id);
             self.items.complete(id.to_owned(), strip_tag(update), out);
+        }
+    }
+
+    /// A subagent call that returned while its child runs on (opencode
+    /// 2.3): its item stays running, the child's updates that follow are
+    /// shown under it, and it completes with the child's last message once
+    /// the child goes quiet. The call's own result only says it started.
+    fn run_in_background(&mut self, id: &str, update: &Value, out: &mut Vec<Event>) {
+        let raw_output = update.get("rawOutput").cloned().unwrap_or(Value::Null);
+        if let Some(child) = raw_output.pointer("/metadata/sessionID").and_then(Value::as_str) {
+            self.child_sessions
+                .entry(child.to_owned())
+                .or_insert_with(|| id.to_owned());
+        }
+        self.unclaimed_subagents.retain(|(t, _)| t != id);
+        let mut patch = strip_tag(update);
+        if let Some(o) = patch.as_object_mut() {
+            o.remove("content");
+            o.remove("status");
+        }
+        self.items.update(id.to_owned(), patch, out);
+        self.background_runs.insert(
+            id.to_owned(),
+            BackgroundRun {
+                raw_output,
+                ..BackgroundRun::default()
+            },
+        );
+    }
+
+    /// Completes the background subagents (see [`Self::run_in_background`])
+    /// with their child's last message as the report.
+    fn finish_background_runs(&mut self, out: &mut Vec<Event>) {
+        for (id, run) in std::mem::take(&mut self.background_runs) {
+            let children: Vec<String> = self
+                .child_sessions
+                .iter()
+                .filter(|(_, item)| **item == id)
+                .map(|(c, _)| c.clone())
+                .collect();
+            for child in children {
+                self.close_child_item(&child, out);
+            }
+            let mut raw_output = run.raw_output;
+            if let Some(m) = raw_output.get_mut("metadata").and_then(Value::as_object_mut) {
+                m.insert("status".into(), json!("completed"));
+            }
+            let mut done = json!({ "rawOutput": raw_output });
+            if !run.report.is_empty() {
+                done["content"] =
+                    json!([{ "type": "content", "content": { "type": "text", "text": run.report } }]);
+            }
+            self.items.complete(id, done, out);
         }
     }
 
@@ -2210,6 +2330,7 @@ impl Driver for AcpDriver {
 
     fn on_output(&mut self, bytes: &[u8]) -> Vec<Event> {
         let mut out = Vec::new();
+        self.heard |= !bytes.is_empty();
         for frame in self.framer.feed(bytes) {
             match frame {
                 Frame::Line(text) => self.handle_line(&text, &mut out),
@@ -2226,6 +2347,34 @@ impl Driver for AcpDriver {
 
     fn poll_transmit(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.outgoing)
+    }
+
+    /// A turn the agent started without a prompt (a background shell, task
+    /// or subagent woke it), or a background subagent, ends with silence:
+    /// once nothing is waiting on the user and no tool call is running.
+    fn quiet_after_ms(&self) -> Option<u64> {
+        let woken = self.turn_open && !self.turn_running();
+        let held =
+            self.replaying || !self.heard || !self.permissions.is_empty() || !self.open_tools.is_empty();
+        ((woken || !self.background_runs.is_empty()) && !held).then_some(WOKEN_TURN_QUIET_MS)
+    }
+
+    fn on_quiet(&mut self) -> Vec<Event> {
+        let mut out = Vec::new();
+        if self.quiet_after_ms().is_none() {
+            return out;
+        }
+        self.finish_background_runs(&mut out);
+        if self.turn_open && !self.turn_running() {
+            self.turn_open = false;
+            self.quiet_ended = true;
+            self.close_turn_items(&mut out);
+            self.set_state(RunState::Done, None, &mut out);
+            out.push(Event::TurnCompleted);
+        } else if matches!(self.state, Some((RunState::Waiting, _))) {
+            self.set_state(RunState::Done, None, &mut out);
+        }
+        out
     }
 
     fn take_events(&mut self) -> Vec<Event> {
@@ -2258,114 +2407,10 @@ impl Driver for AcpDriver {
     }
 
     fn command(&mut self, cmd: Command) -> Result<Vec<u8>, DriverError> {
-        match cmd {
-            Command::Prompt { text, attachments } => {
-                validate_attachments(&attachments)?;
-                // No session yet (still handshaking, opening, or waiting on
-                // auth): hold the prompt instead of dropping it, and send it
-                // the moment a session opens.
-                if self.session_id.is_none() && self.phase != Phase::Failed {
-                    self.queued_prompts.push((text, attachments));
-                    return Ok(Vec::new());
-                }
-                self.try_prompt(text, attachments)
-            }
-            Command::Interrupt => {
-                let sid = self.require_session()?;
-                // The spec requires answering open permission requests with
-                // `cancelled` once the client cancels.
-                for (_, wait) in std::mem::take(&mut self.permissions) {
-                    if wait.form.is_some() {
-                        self.answer_form(wait.rpc_id, "cancel", None);
-                    } else {
-                        self.answer_permission(wait.rpc_id, json!({ "outcome": "cancelled" }));
-                    }
-                }
-                let mut bytes = std::mem::take(&mut self.outgoing);
-                bytes.extend(Self::notification("session/cancel", json!({ "sessionId": sid })));
-                Ok(bytes)
-            }
-            Command::New => {
-                if self.phase == Phase::Initializing || self.phase == Phase::Failed {
-                    return Err(DriverError::NotStarted);
-                }
-                // Free the session left behind; the agent keeps it on disk.
-                let mut bytes = match self.session_id.clone() {
-                    Some(sid) if self.close_session => {
-                        self.request("session/close", json!({ "sessionId": sid }), Pending::Close)
-                    }
-                    _ => Vec::new(),
-                };
-                // The new session keeps the launch system prompt.
-                let params = self.session_params(None);
-                bytes.extend(self.request("session/new", params, Pending::NewSession));
-                Ok(bytes)
-            }
-            Command::Fork => {
-                if !self.fork_session {
-                    return Err(self.unsupported("fork"));
-                }
-                let sid = self.require_session()?;
-                let cwd = self.cfg.cwd.clone();
-                Ok(self.request(
-                    "session/fork",
-                    json!({ "sessionId": sid, "cwd": cwd, "mcpServers": self.mcp_servers() }),
-                    Pending::Fork,
-                ))
-            }
-            Command::Compact { hint } => self.slash(
-                &["compact", "summarize", "compress"],
-                hint.as_deref().unwrap_or(""),
-                "compact",
-            ),
-            Command::Rename { name } if self.set_title => {
-                let sid = self.require_session()?;
-                Ok(self.request(
-                    "session/set_title",
-                    json!({ "sessionId": sid, "title": name }),
-                    Pending::SetTitle { title: name },
-                ))
-            }
-            Command::Rename { name } => self.slash(&["rename"], &name, "rename"),
-            Command::Review => self.slash(&["review"], "", "review"),
-            Command::Shell { .. } => Err(self.unsupported("shell commands")),
-            Command::Invoke { name, args } => self.invoke(&name, &args),
-            // ACP agents push commands, options and usage as they change;
-            // there is nothing to ask for.
-            Command::Refresh => Ok(Vec::new()),
-            Command::Handoff { .. } => Err(self.unsupported("handoff without a relaunch")),
-            Command::SetOption { id, value } => self.set_option(id, value),
-            Command::AnswerPermission {
-                request_id,
-                option_id,
-            } => {
-                let wait = self
-                    .permissions
-                    .remove(&request_id)
-                    .ok_or_else(|| DriverError::UnknownRequest(request_id.clone()))?;
-                if let Some(schema) = &wait.form {
-                    match option_id.as_str() {
-                        "decline" | "cancel" => self.answer_form(wait.rpc_id, &option_id, None),
-                        _ => {
-                            let answers = crate::question::decode(&option_id);
-                            let content = elicitation::content(schema, &answers);
-                            self.answer_form(wait.rpc_id, "accept", Some(content));
-                        }
-                    }
-                    return Ok(std::mem::take(&mut self.outgoing));
-                }
-                if !wait.option_ids.is_empty() && !wait.option_ids.contains(&option_id) {
-                    self.permissions.insert(request_id.clone(), wait);
-                    return Err(DriverError::InvalidOption(option_id));
-                }
-                // The state leaves `blocked` on the agent's next update.
-                self.answer_permission(
-                    wait.rpc_id,
-                    json!({ "outcome": "selected", "optionId": option_id }),
-                );
-                Ok(std::mem::take(&mut self.outgoing))
-            }
-        }
+        let bytes = self.dispatch(cmd)?;
+        // A permission answer, for one, is in the agent's hands now.
+        self.heard &= bytes.is_empty();
+        Ok(bytes)
     }
 
     fn commands(&self) -> &[CommandEntry] {
@@ -2540,6 +2585,120 @@ pub use crate::harness::acp_launch_spec as launch_spec;
 
 /// The content blocks of a prompt: text, then images. An image-only prompt
 /// carries no text block.
+impl AcpDriver {
+    /// [`Driver::command`], before it notes that the agent has the next move.
+    fn dispatch(&mut self, cmd: Command) -> Result<Vec<u8>, DriverError> {
+        match cmd {
+            Command::Prompt { text, attachments } => {
+                validate_attachments(&attachments)?;
+                // No session yet (still handshaking, opening, or waiting on
+                // auth): hold the prompt instead of dropping it, and send it
+                // the moment a session opens.
+                if self.session_id.is_none() && self.phase != Phase::Failed {
+                    self.queued_prompts.push((text, attachments));
+                    return Ok(Vec::new());
+                }
+                self.try_prompt(text, attachments)
+            }
+            Command::Interrupt => {
+                let sid = self.require_session()?;
+                // The spec requires answering open permission requests with
+                // `cancelled` once the client cancels.
+                for (_, wait) in std::mem::take(&mut self.permissions) {
+                    if wait.form.is_some() {
+                        self.answer_form(wait.rpc_id, "cancel", None);
+                    } else {
+                        self.answer_permission(wait.rpc_id, json!({ "outcome": "cancelled" }));
+                    }
+                }
+                let mut bytes = std::mem::take(&mut self.outgoing);
+                bytes.extend(Self::notification("session/cancel", json!({ "sessionId": sid })));
+                Ok(bytes)
+            }
+            Command::New => {
+                if self.phase == Phase::Initializing || self.phase == Phase::Failed {
+                    return Err(DriverError::NotStarted);
+                }
+                // Free the session left behind; the agent keeps it on disk.
+                let mut bytes = match self.session_id.clone() {
+                    Some(sid) if self.close_session => {
+                        self.request("session/close", json!({ "sessionId": sid }), Pending::Close)
+                    }
+                    _ => Vec::new(),
+                };
+                // The new session keeps the launch system prompt.
+                let params = self.session_params(None);
+                bytes.extend(self.request("session/new", params, Pending::NewSession));
+                Ok(bytes)
+            }
+            Command::Fork => {
+                if !self.fork_session {
+                    return Err(self.unsupported("fork"));
+                }
+                let sid = self.require_session()?;
+                let cwd = self.cfg.cwd.clone();
+                Ok(self.request(
+                    "session/fork",
+                    json!({ "sessionId": sid, "cwd": cwd, "mcpServers": self.mcp_servers() }),
+                    Pending::Fork,
+                ))
+            }
+            Command::Compact { hint } => self.slash(
+                &["compact", "summarize", "compress"],
+                hint.as_deref().unwrap_or(""),
+                "compact",
+            ),
+            Command::Rename { name } if self.set_title => {
+                let sid = self.require_session()?;
+                Ok(self.request(
+                    "session/set_title",
+                    json!({ "sessionId": sid, "title": name }),
+                    Pending::SetTitle { title: name },
+                ))
+            }
+            Command::Rename { name } => self.slash(&["rename"], &name, "rename"),
+            Command::Review => self.slash(&["review"], "", "review"),
+            Command::Shell { .. } => Err(self.unsupported("shell commands")),
+            Command::Invoke { name, args } => self.invoke(&name, &args),
+            // ACP agents push commands, options and usage as they change;
+            // there is nothing to ask for.
+            Command::Refresh => Ok(Vec::new()),
+            Command::Handoff { .. } => Err(self.unsupported("handoff without a relaunch")),
+            Command::SetOption { id, value } => self.set_option(id, value),
+            Command::AnswerPermission {
+                request_id,
+                option_id,
+            } => {
+                let wait = self
+                    .permissions
+                    .remove(&request_id)
+                    .ok_or_else(|| DriverError::UnknownRequest(request_id.clone()))?;
+                if let Some(schema) = &wait.form {
+                    match option_id.as_str() {
+                        "decline" | "cancel" => self.answer_form(wait.rpc_id, &option_id, None),
+                        _ => {
+                            let answers = crate::question::decode(&option_id);
+                            let content = elicitation::content(schema, &answers);
+                            self.answer_form(wait.rpc_id, "accept", Some(content));
+                        }
+                    }
+                    return Ok(std::mem::take(&mut self.outgoing));
+                }
+                if !wait.option_ids.is_empty() && !wait.option_ids.contains(&option_id) {
+                    self.permissions.insert(request_id.clone(), wait);
+                    return Err(DriverError::InvalidOption(option_id));
+                }
+                // The state leaves `blocked` on the agent's next update.
+                self.answer_permission(
+                    wait.rpc_id,
+                    json!({ "outcome": "selected", "optionId": option_id }),
+                );
+                Ok(std::mem::take(&mut self.outgoing))
+            }
+        }
+    }
+}
+
 fn prompt_blocks(text: &str, attachments: &[Attachment]) -> Vec<Value> {
     let mut prompt = Vec::new();
     if !text.is_empty() || attachments.is_empty() {
@@ -2579,6 +2738,15 @@ fn id_key(id: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+/// A tool call whose result says its work goes on: opencode 2.3's
+/// background subagents (`rawOutput.metadata.status: "running"`).
+fn runs_in_background(update: &Value) -> bool {
+    update
+        .pointer("/rawOutput/metadata/status")
+        .and_then(Value::as_str)
+        == Some("running")
 }
 
 fn is_final(update: &Value) -> bool {

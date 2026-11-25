@@ -1072,7 +1072,8 @@ fn acp_subagent(name: &str, ext: &Value, output: Option<String>, text: &str) -> 
             .pointer("/metadata/model/modelID")
             .and_then(Value::as_str)
             .map(str::to_owned),
-        background: false,
+        // opencode 2.3: the call returned while the child runs on.
+        background: raw_out.pointer("/metadata/status").and_then(Value::as_str) == Some("running"),
     }
 }
 

@@ -90,6 +90,21 @@ pub trait Driver: Send {
 
     fn on_history(&mut self, _output: &str) {}
 
+    /// How long the harness has to stay silent before [`Driver::on_quiet`]
+    /// ends what only silence ends, such as a turn the agent started on its
+    /// own when background work woke it (ACP sends no reply for that turn).
+    /// `None` while nothing waits on silence. Drivers have no clock: the
+    /// session layer measures the silence from the last output it fed.
+    fn quiet_after_ms(&self) -> Option<u64> {
+        None
+    }
+
+    /// The harness stayed silent for [`Driver::quiet_after_ms`]. Returns
+    /// the events that silence implies (the woken turn completed).
+    fn on_quiet(&mut self) -> Vec<Event> {
+        Vec::new()
+    }
+
     /// The driver's whole state, for [`crate::session::Session::snapshot`].
     /// Restored by deserializing the concrete driver for the harness.
     fn snapshot(&self) -> Option<Value> {

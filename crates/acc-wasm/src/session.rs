@@ -227,6 +227,21 @@ impl AccSession {
         updates(self.inner.take_updates(ms(now_ms)))
     }
 
+    /// When to call `tick` next (`Date.now()` time), or undefined while
+    /// nothing waits for the log to fall silent. Ask again after every
+    /// `feed` and `command`.
+    #[wasm_bindgen(js_name = nextTickMs)]
+    pub fn next_tick_ms(&self) -> Option<f64> {
+        self.inner.next_tick_ms().map(|t| t as f64)
+    }
+
+    /// Acts on the time: once the log has been silent long enough, returns
+    /// what that means (JSON array of `Update`s), such as a turn that
+    /// background work woke (with no prompt to reply to) completing.
+    pub fn tick(&mut self, now_ms: f64) -> JsValue {
+        updates(self.inner.tick(ms(now_ms)))
+    }
+
     /// Bytes to write to the harness now (send with `input_exec`).
     #[wasm_bindgen(js_name = takeTransmit)]
     pub fn take_transmit(&mut self) -> Vec<u8> {

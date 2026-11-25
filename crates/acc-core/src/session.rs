@@ -399,6 +399,9 @@ pub struct Session {
     handshaken: bool,
     /// What the host's sandbox applied, once a launch or status said.
     sandbox: Option<Applied>,
+    /// When the log last grew, for [`Session::tick`]. Not kept in a
+    /// snapshot: a restored session waits for new output first.
+    last_output_ms: Option<u64>,
 }
 
 /// What [`Session::snapshot`] writes; borrowed on the way out.
@@ -655,6 +658,7 @@ impl Session {
             exited: false,
             handshaken: true,
             sandbox: None,
+            last_output_ms: None,
             spec,
         };
         Ok((session, exec))
@@ -732,6 +736,7 @@ impl Session {
             exited: false,
             handshaken: false,
             sandbox: None,
+            last_output_ms: None,
             spec,
         })
     }
@@ -814,6 +819,7 @@ impl Session {
             exited: snap.exited,
             handshaken: snap.handshaken,
             sandbox: None,
+            last_output_ms: None,
             spec,
         })
     }
@@ -1007,6 +1013,9 @@ impl Session {
     /// Feeds bytes from the log, which must start at [`Session::offset`].
     pub fn feed(&mut self, bytes: &[u8], now_ms: u64) -> Vec<Update> {
         let mut out = self.take_updates(now_ms);
+        if !bytes.is_empty() {
+            self.last_output_ms = Some(now_ms);
+        }
         let until = self.replay_until.unwrap_or(u64::MAX);
         let split = if self.offset < until {
             (until - self.offset).min(bytes.len() as u64) as usize
@@ -1032,6 +1041,34 @@ impl Session {
             self.transmit.extend(t);
         }
         out.extend(self.take_updates(now_ms));
+        self.police(&mut out);
+        out
+    }
+
+    /// When to call [`Session::tick`] next (milliseconds since the Unix
+    /// epoch): the driver waits for the harness to fall silent, such as to
+    /// end a turn background work woke without a prompt. `None` while
+    /// nothing waits; ask again after every [`Session::feed`] and
+    /// [`Session::command`].
+    pub fn next_tick_ms(&self) -> Option<u64> {
+        if self.exited || self.replay_until.is_none_or(|until| self.offset < until) {
+            return None;
+        }
+        let quiet = self.driver.quiet_after_ms()?;
+        Some(self.last_output_ms?.saturating_add(quiet))
+    }
+
+    /// Lets the session act on the time: once the log has been silent long
+    /// enough (see [`Session::next_tick_ms`]), returns what that silence
+    /// means, such as the woken turn completing. Cheap; calling it early or
+    /// when nothing waits returns nothing.
+    pub fn tick(&mut self, now_ms: u64) -> Vec<Update> {
+        let mut out = Vec::new();
+        if self.next_tick_ms().is_none_or(|at| now_ms < at) {
+            return out;
+        }
+        let events = self.driver.on_quiet();
+        self.apply(events, false, now_ms, &mut out);
         self.police(&mut out);
         out
     }
@@ -1308,6 +1345,7 @@ impl Session {
         self.pending_prompt = None;
         self.exited = false;
         self.handshaken = false;
+        self.last_output_ms = None;
     }
 
     /// The harness exited with `code`; `stderr` is the last line it wrote
@@ -1530,6 +1568,41 @@ mod tests {
             ups.extend(a.feed(chunk, 3));
         }
         (a, ups)
+    }
+
+    /// opencode 2.3.2: after `end_turn`, a finished background shell wakes
+    /// a turn nothing replies to; silence ends it, measured from the last
+    /// bytes fed and only once the replay has caught up.
+    #[test]
+    fn a_woken_turn_ends_on_tick_after_silence() {
+        use crate::acp::WOKEN_TURN_QUIET_MS as QUIET;
+        let log = include_str!("../tests/fixtures/acp/opencode-2.3.2-background.out.ndjson");
+        let (s, _) = Session::launch(req(Harness::Opencode), "s1", "first", 1).unwrap();
+        let mut a = Session::attach(s.spec().clone(), "second").unwrap();
+        let _ = a.on_status(&format!("alive 7 {}", log.len()), 2);
+        let (head, tail) = log.split_at(log.len() / 2);
+        a.feed(head.as_bytes(), 3);
+        assert_eq!(a.next_tick_ms(), None, "still replaying");
+        a.feed(tail.as_bytes(), 5);
+        assert_eq!(
+            a.state().map(|s| &s.state),
+            Some(&RunState::Working { progress: None })
+        );
+        assert_eq!(a.next_tick_ms(), Some(5 + QUIET));
+        assert!(a.tick(4 + QUIET).is_empty());
+        let ups = a.tick(5 + QUIET);
+        assert!(
+            ups.iter().any(|u| matches!(u.event, Event::TurnCompleted)),
+            "{ups:?}"
+        );
+        assert_eq!(a.state().map(|s| &s.state), Some(&RunState::Done));
+        assert_eq!(a.next_tick_ms(), None);
+        assert!(
+            a.transcript()
+                .items()
+                .iter()
+                .all(|i| i.status != crate::transcript::ItemStatus::Running)
+        );
     }
 
     #[test]

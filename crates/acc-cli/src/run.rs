@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::io::{BufRead as _, Read as _, Write as _};
 use std::process::{Child, ChildStdin, Command as Proc, ExitCode, Stdio};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use acc_core::acp::{AcpConfig, AcpDriver, Start};
 use acc_core::claude::{ClaudeConfig, ClaudeDriver};
@@ -47,6 +47,9 @@ pub enum Input {
     CaughtUp,
     User(String),
     UserClosed,
+    /// The harness stayed silent as long as the driver waited for
+    /// ([`Driver::quiet_after_ms`]).
+    Quiet,
 }
 
 pub fn run(harness: Harness, args: &[&str]) -> Result<ExitCode, String> {
@@ -203,9 +206,21 @@ pub fn run(harness: Harness, args: &[&str]) -> Result<ExitCode, String> {
     // and are sent once `SessionStarted` arrives.
     let mut queued: Vec<Command> = Vec::new();
     let mut exit = None;
+    let mut last_output = Instant::now();
     loop {
         let input = if link.is_open() {
-            rx.recv().map_err(|e| e.to_string())?
+            match driver.quiet_after_ms() {
+                // A turn background work woke ends with silence.
+                Some(quiet) => {
+                    let wait = Duration::from_millis(quiet).saturating_sub(last_output.elapsed());
+                    match rx.recv_timeout(wait) {
+                        Ok(input) => input,
+                        Err(mpsc::RecvTimeoutError::Timeout) => Input::Quiet,
+                        Err(e) => return Err(e.to_string()),
+                    }
+                }
+                None => rx.recv().map_err(|e| e.to_string())?,
+            }
         } else if let Link::Local { child, .. } = &mut link {
             // Stdin is closed; give the harness a moment to exit on its own.
             match rx.recv_timeout(Duration::from_secs(5)) {
@@ -219,9 +234,16 @@ pub fn run(harness: Harness, args: &[&str]) -> Result<ExitCode, String> {
             break;
         };
         match input {
-            Input::Agent(bytes) => {
+            input @ (Input::Agent(_) | Input::Quiet) => {
+                let events = match input {
+                    Input::Agent(bytes) => {
+                        last_output = Instant::now();
+                        driver.on_output(&bytes)
+                    }
+                    _ => driver.on_quiet(),
+                };
                 let mut started = false;
-                for mut event in driver.on_output(&bytes) {
+                for mut event in events {
                     started |= matches!(event, Event::SessionStarted { .. });
                     // The driver has no clock; stamp state on receipt.
                     if let Event::StateChanged(state) = &mut event {

@@ -2,6 +2,7 @@
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, PoisonError};
+use std::time::Duration;
 
 use tokio::sync::Mutex;
 
@@ -194,7 +195,9 @@ impl Session {
     /// Waits for the next events, reconnecting as needed. Replies the driver
     /// owes the harness (JSON-RPC answers) are written before returning.
     /// Once the harness has exited this returns the exit events, then
-    /// `[Exited]` on every later call.
+    /// `[Exited]` on every later call. While the driver waits for the
+    /// harness to fall silent (see [`Core::next_tick_ms`]), what the silence
+    /// means comes back too, such as a woken turn completing.
     pub async fn next_events(&self) -> Result<Vec<Event>> {
         let queued = std::mem::take(&mut *self.lock_queued());
         if !queued.is_empty() {
@@ -202,7 +205,26 @@ impl Session {
         }
         self.flush().await?;
         loop {
-            match self.pipe.read().await? {
+            let read = match self.with_core(|c| c.next_tick_ms()) {
+                // `Detached::read` loses nothing when dropped: the offset
+                // only moves once bytes are returned.
+                Some(at) => {
+                    let wait = Duration::from_millis(at.saturating_sub(now_ms()));
+                    match tokio::time::timeout(wait, self.pipe.read()).await {
+                        Ok(read) => read?,
+                        Err(_) => {
+                            let events = self.with_core(|c| c.tick(now_ms()));
+                            if !events.is_empty() {
+                                return Ok(events);
+                            }
+                            // Nothing came of it; don't spin on a past deadline.
+                            self.pipe.read().await?
+                        }
+                    }
+                }
+                None => self.pipe.read().await?,
+            };
+            match read {
                 Read::Data(bytes) => {
                     let got = self.with_core(|c| c.receive(&bytes, now_ms()));
                     match self.pipe.write(&got.transmit).await {
