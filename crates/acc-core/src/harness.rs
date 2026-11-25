@@ -191,21 +191,24 @@ impl Harness {
                     // calls, as frames with `parent_tool_use_id` (2.1.280+).
                     "--forward-subagent-text",
                 ]);
+                // Authoritative idle/running/requires_action frames.
+                let mut e = vec![
+                    ("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS".into(), "1".into()),
+                    // The exit hint names ACC's command, not `claude --resume`.
+                    (
+                        "CLAUDE_CODE_RESUME_HINT_COMMAND".into(),
+                        "acc run claude --resume".into(),
+                    ),
+                ];
                 if let Some(id) = resume {
                     a.extend(s(&["--resume", id]));
+                    // A resumed session (a revival after a reboot or kill
+                    // included) must not run a tool call a hook deferred:
+                    // no client approved it and none may be watching
+                    // (2.1.328+; older CLIs ignore it).
+                    e.push(("CLAUDE_CODE_DISABLE_DEFERRED_TOOL_RESUME".into(), "1".into()));
                 }
-                // Authoritative idle/running/requires_action frames.
-                (
-                    a,
-                    vec![
-                        ("CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS".into(), "1".into()),
-                        // The exit hint names ACC's command, not `claude --resume`.
-                        (
-                            "CLAUDE_CODE_RESUME_HINT_COMMAND".into(),
-                            "acc run claude --resume".into(),
-                        ),
-                    ],
-                )
+                (a, e)
             }
             Harness::Codex => (s(&["app-server"]), vec![]),
             Harness::Pi => {
@@ -468,6 +471,16 @@ mod tests {
         let spec = Harness::Claude.launch(Some("abc"));
         assert_eq!(spec.args[spec.args.len() - 2..], ["--resume", "abc"]);
         assert_eq!(spec.protocol, Protocol::ClaudeStreamJson);
+    }
+
+    #[test]
+    fn claude_resume_never_runs_a_deferred_tool_call() {
+        let var = (
+            "CLAUDE_CODE_DISABLE_DEFERRED_TOOL_RESUME".to_owned(),
+            "1".to_owned(),
+        );
+        assert!(Harness::Claude.launch(Some("abc")).env.contains(&var));
+        assert!(!Harness::Claude.launch(None).env.iter().any(|(k, _)| *k == var.0));
     }
 
     #[test]

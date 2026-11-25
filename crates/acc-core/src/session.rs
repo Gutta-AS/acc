@@ -2038,6 +2038,11 @@ mod tests {
             exec.script
         );
         assert!(exec.script.contains("acceptEdits"), "{}", exec.script);
+        assert!(
+            exec.script.contains("CLAUDE_CODE_DISABLE_DEFERRED_TOOL_RESUME"),
+            "a revived session must not run a deferred tool call: {}",
+            exec.script
+        );
 
         s.on_launched(&format!("42\nL {}\n", CLAUDE_HI.len()));
         assert_eq!(
