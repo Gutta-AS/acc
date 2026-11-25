@@ -406,7 +406,10 @@ in `spec.json` and carried over by revive, fork, restart and handoff.
 ones the harness has configured (which `acc-loadout` manages): Claude gets one `--mcp-config=<json>` argument,
 Codex `config` overrides (one `mcp_servers.<name>` key each, so the user's servers stay) on `thread/start`,
 `resume` and `fork`, and ACP agents the list as `mcpServers` on `session/new`, `load`, `resume` and `fork`.
-pi has no MCP, so launching pi with servers is refused, and a handoff to pi leaves them out. Names are 1-64 of
+pi (0.99 and later) reads no per-launch MCP config, so it loads an extension that registers them for the session:
+the launch script writes it to `~/.acc/pi/session-mcp.ts` (one file for every session), pi gets `-e` with that path
+and the servers as JSON in `ACC_MCP_SERVERS`, and they are `direct`, so the model sees their tools without
+searching. An older pi fails to load the extension and reports it. Names are 1-64 of
 `A-Z a-z 0-9 _ -`. They are kept in `spec.json` and carried over by revive, fork, restart and handoff; without
 any, nothing in the launch changes.
 

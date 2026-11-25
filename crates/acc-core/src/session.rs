@@ -121,8 +121,9 @@ pub struct LaunchRequest {
     /// MCP servers for this session only, next to the ones the harness has
     /// configured: Claude takes them as `--mcp-config`, Codex as `config`
     /// overrides of the thread (`mcp_servers.<name>`), ACP agents in
-    /// `mcpServers` when the session opens. pi has no MCP, so a session
-    /// with servers can't launch on it. Kept in `spec.json` and carried
+    /// `mcpServers` when the session opens, pi (0.99 and later) through an
+    /// extension that registers them (`-e`, see
+    /// [`crate::detached::PI_MCP_EXTENSION`]). Kept in `spec.json` and carried
     /// over to relaunches.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<SessionMcpServer>,
@@ -210,6 +211,21 @@ fn claude_mcp_config(servers: &[SessionMcpServer]) -> String {
     let map: serde_json::Map<String, serde_json::Value> =
         servers.iter().map(|s| (s.name.clone(), s.config())).collect();
     format!("--mcp-config={}", serde_json::json!({ "mcpServers": map }))
+}
+
+/// pi's arguments and environment for these servers: the extension that
+/// registers them ([`crate::detached::PI_MCP_EXTENSION`], which the launch
+/// script writes) and the servers as `mcpServers` entries for it.
+fn pi_mcp_launch(servers: &[SessionMcpServer]) -> ([String; 2], (String, String)) {
+    let map: serde_json::Map<String, serde_json::Value> =
+        servers.iter().map(|s| (s.name.clone(), s.config())).collect();
+    (
+        ["-e".to_owned(), crate::detached::PI_MCP_EXTENSION.to_owned()],
+        (
+            crate::detached::PI_MCP_ENV.to_owned(),
+            serde_json::Value::Object(map).to_string(),
+        ),
+    )
 }
 
 /// Everything another client needs to attach; stored as `spec.json`.
@@ -537,12 +553,6 @@ impl Session {
         if let Some(bad) = req.mcp_servers.iter().find(|s| !s.valid()) {
             return Err(SessionError::InvalidMcpServer(bad.name.clone()));
         }
-        if harness == Harness::Pi && !req.mcp_servers.is_empty() {
-            return Err(SessionError::Driver(DriverError::Unsupported {
-                harness,
-                what: "MCP servers (pi has no MCP)",
-            }));
-        }
         if let Some(cap) = &req.spend_cap {
             if !(cap.amount.is_finite() && cap.amount > 0.0) {
                 return Err(SessionError::InvalidSpendCap);
@@ -604,6 +614,11 @@ impl Session {
         }
         if harness == Harness::Claude && !spec.mcp_servers.is_empty() {
             spec.launch.args.push(claude_mcp_config(&spec.mcp_servers));
+        }
+        if harness == Harness::Pi && !spec.mcp_servers.is_empty() {
+            let (args, env) = pi_mcp_launch(&spec.mcp_servers);
+            spec.launch.args.extend(args);
+            spec.launch.env.push(env);
         }
         if let Some(flag) = spec.spend_cap.and_then(|c| c.flag(harness)) {
             spec.launch.args.push(flag);
@@ -1131,12 +1146,7 @@ impl Session {
             launcher: self.spec.launcher.clone(),
             sandbox: self.spec.sandbox.clone(),
             system_prompt: self.spec.system_prompt.clone(),
-            // Unless the new harness can't take them.
-            mcp_servers: if to == Harness::Pi {
-                Vec::new()
-            } else {
-                self.spec.mcp_servers.clone()
-            },
+            mcp_servers: self.spec.mcp_servers.clone(),
             // Unless the new harness doesn't count in that unit.
             spend_cap: self.spec.spend_cap.filter(|c| c.flag(to).is_some()),
             ..LaunchRequest::default()
@@ -1662,17 +1672,27 @@ mod tests {
         let (s, _) = with(Harness::Opencode).unwrap();
         let spec = SessionSpec::from_json(&s.spec().to_json()).unwrap();
         assert_eq!(spec.mcp_servers, [mcp_server()]);
-        // A handoff to pi leaves them behind instead of failing.
-        assert!(s.handoff(Harness::Pi, None).unwrap().mcp_servers.is_empty());
-        assert_eq!(
-            s.handoff(Harness::Claude, None).unwrap().mcp_servers,
-            [mcp_server()]
-        );
+        for to in [Harness::Pi, Harness::Claude] {
+            assert_eq!(s.handoff(to, None).unwrap().mcp_servers, [mcp_server()]);
+        }
 
-        assert!(matches!(
-            with(Harness::Pi),
-            Err(SessionError::Driver(DriverError::Unsupported { .. }))
-        ));
+        // pi loads ACC's extension, which registers them from the env.
+        let (s, exec) = with(Harness::Pi).unwrap();
+        let launch = &s.spec().launch;
+        let e = launch.args.iter().position(|a| a == "-e").unwrap();
+        assert_eq!(launch.args[e + 1], crate::detached::PI_MCP_EXTENSION);
+        let (_, servers) = launch
+            .env
+            .iter()
+            .find(|(k, _)| k == crate::detached::PI_MCP_ENV)
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(servers).unwrap(),
+            serde_json::json!({"acc_ui": {"command": "sh",
+                "args": ["/h/.acc-ui/server-1.sh"], "env": {"ACC_UI_SESSION": "s1"}}})
+        );
+        assert!(exec.script.contains("session-mcp.ts"), "{}", exec.script);
+        assert_eq!(s.relaunch(false, None).mcp_servers, [mcp_server()]);
         for bad in ["", "a.b", "has space"] {
             let mut r = req(Harness::Claude);
             r.mcp_servers = vec![SessionMcpServer {
@@ -1688,6 +1708,16 @@ mod tests {
         let (s, _) = Session::launch(req(Harness::Claude), "mcp3", "t", 0).unwrap();
         assert!(!s.spec().launch.args.iter().any(|a| a.starts_with("--mcp-config")));
         assert!(!s.spec().to_json().contains("mcp_servers"));
+        let (s, exec) = Session::launch(req(Harness::Pi), "mcp4", "t", 0).unwrap();
+        assert!(!s.spec().launch.args.iter().any(|a| a == "-e"));
+        assert!(
+            s.spec()
+                .launch
+                .env
+                .iter()
+                .all(|(k, _)| k != crate::detached::PI_MCP_ENV)
+        );
+        assert!(!exec.script.contains("session-mcp.ts"));
     }
 
     #[test]
